@@ -99,9 +99,7 @@ def discover_secondary_pc(timeout=3.0):
             return False
 
     if not _is_visible():
-        print("[后台模式] 暂未连上辅助电脑，等待 3 秒后重试发现...")
-        time.sleep(3.0)
-        return discover_secondary_pc(timeout=3.0)
+        return None
 
     # 兜底 2: 手动输入 IP（仅在前台可见窗口时交互）
     print("\n" + "!" * 60)
