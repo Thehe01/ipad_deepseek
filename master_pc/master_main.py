@@ -21,6 +21,7 @@ from master_config import (
 )
 from discovery import discover_secondary_pc
 from roi_selector import get_roi_interactive
+from screen_monitor import ScreenMonitor
 
 # ── 主电脑剪切板工具（Win32 ctypes 64位完全兼容）──
 _u32 = ctypes.windll.user32
@@ -68,6 +69,7 @@ def _write_clipboard(text):
 # ── 全局状态 ────────────────────────────────────────────────
 _secondary_url = None
 _roi = None
+_screen_monitor = None
 _lock = threading.Lock()
 _uploading = False          # 防止快捷键连按重叠上传
 _running = True
@@ -294,7 +296,7 @@ def upload_image(image_path):
 
 def on_hotkey_trigger(trigger_name="快捷键"):
     """快捷键/鼠标中键回调：截图 → 保存 → 异步上传"""
-    global _roi, _secondary_url
+    global _roi, _secondary_url, _screen_monitor
     if _secondary_url is None or _roi is None:
         _log("[提示] 尚未就绪，请稍候...")
         return
@@ -304,11 +306,18 @@ def on_hotkey_trigger(trigger_name="快捷键"):
         img = grab_roi(_roi)
         img.save(TEMP_IMAGE_PATH, format="PNG")
         _log(f"[截图保存成功] {TEMP_IMAGE_PATH}")
+        if _screen_monitor:
+            _screen_monitor.sync_ref_frame(img)
     except Exception as e:
         _log(f"[截图失败] {e}")
         return
     # 在新线程中上传，不阻塞热键监听
     threading.Thread(target=upload_image, args=(TEMP_IMAGE_PATH,), daemon=True).start()
+
+
+def on_auto_question_detected(image_path, is_manual=False):
+    """全自动画面翻页感知回调：自动上传截图"""
+    threading.Thread(target=upload_image, args=(image_path,), daemon=True).start()
 
 
 def _win32_hotkey_polling_loop():
@@ -328,6 +337,7 @@ def _win32_hotkey_polling_loop():
     VK_ALT = 0x12
     VK_F8 = 0x77
     VK_F9 = 0x78
+    VK_F10 = 0x79
     VK_Q = 0x51
     VK_MBUTTON = 0x04   # 鼠标滚轮中键
     VK_XBUTTON1 = 0x05  # 鼠标侧键 1
@@ -340,6 +350,7 @@ def _win32_hotkey_polling_loop():
     last_snap_time = 0.0
     ctrl_down_prev = False
     f9_prev = False
+    f10_prev = False
     ctrl_q_prev = False
     last_ctrl_press_time = 0.0
 
@@ -352,6 +363,7 @@ def _win32_hotkey_polling_loop():
             alt = bool(u32.GetAsyncKeyState(VK_ALT) & 0x8000)
             f8 = bool(u32.GetAsyncKeyState(VK_F8) & 0x8000)
             f9 = bool(u32.GetAsyncKeyState(VK_F9) & 0x8000)
+            f10 = bool(u32.GetAsyncKeyState(VK_F10) & 0x8000)
             q = bool(u32.GetAsyncKeyState(VK_Q) & 0x8000)
             mbutton = bool(u32.GetAsyncKeyState(VK_MBUTTON) & 0x8000)
             xbutton = bool((u32.GetAsyncKeyState(VK_XBUTTON1) & 0x8000) or
@@ -388,6 +400,12 @@ def _win32_hotkey_polling_loop():
             if f9 and not f9_prev:
                 fetch_content_to_clipboard(trigger_name="按键 F9")
             f9_prev = f9
+
+            # ── 3.5 暂停/恢复自动切题监控：F10 ──
+            if f10 and not f10_prev:
+                if _screen_monitor:
+                    _screen_monitor.toggle_pause()
+            f10_prev = f10
 
             # ── 4. 双击 Ctrl 独立检测（宽松时间 0.03s ~ 0.85s，无 Shift/Alt 干扰）──
             if ctrl and not ctrl_down_prev:
@@ -429,11 +447,13 @@ def main():
     args = parse_args()
 
     print("=" * 65)
-    print("      【主电脑端】无痕截题 → 局域网秒级直传辅助电脑")
+    print("      【主电脑端】全自动翻页截题 → 局域网秒级直传辅助电脑")
     print("=" * 65)
-    print(f"  [鼠标滚轮中键]        点击滚轮中键立即截题（双手零碰键盘，防监考检测）")
+    print(f"  [全自动感知切题]      默认开启！画面翻页稳定 0.8s 自动保存上传（完全零按键）")
+    print(f"  [鼠标滚轮中键]        点击滚轮中键手动立即截题保底（手不离鼠标，防监考检测）")
     print(f"  [鼠标侧键]            点击侧键亦可截题（前进/后退键）")
     print(f"  [Ctrl+Shift] 或 [F8]  键盘截题备选通道")
+    print(f"  [F10]                暂停/恢复全自动切题监控")
     print(f"  [双击 Ctrl] / [Ctrl+Q] / [F9] 拷贝最新题目内容至剪切板（大题需要粘贴时使用）")
     print(f"  [Ctrl+C]             退出程序")
     print("=" * 65)
@@ -454,38 +474,55 @@ def main():
         keyboard.add_hotkey("f8", on_hotkey_trigger)
         keyboard.add_hotkey("ctrl+q", lambda: fetch_content_to_clipboard(trigger_name="快捷键 Ctrl+Q"))
         keyboard.add_hotkey("f9", lambda: fetch_content_to_clipboard(trigger_name="按键 F9"))
+        keyboard.add_hotkey("f10", lambda: _screen_monitor.toggle_pause() if _screen_monitor else None)
     except Exception:
         pass
 
-    _log("[监听就绪] 截题已支持 [鼠标滚轮中键] / [鼠标侧键] / [Ctrl+Shift] / [F8]、内容提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已激活！")
+    _log("[监听就绪] 全自动感知切题已待命！手动截题 [鼠标滚轮中键] / [鼠标侧键] / [Ctrl+Shift] / [F8]、内容提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已激活！")
 
-    # 2. 自动发现或手动指定辅助电脑地址
-    if args.server:
-        _secondary_url = args.server.rstrip("/")
-        _log(f"[配置] 已手动指定辅助电脑地址: {_secondary_url}")
-    else:
-        _secondary_url = discover_secondary_pc(timeout=5.0)
-
-    if not _secondary_url:
-        _log("[提示] 暂时未发现辅助电脑，剪切板与热键服务已保持运行。")
-    else:
-        _log(f"[连接成功] 辅助电脑地址: {_secondary_url}")
-
-    # 3. 框选或复用题目区域
+    # 2. 框选或复用题目区域并立即启动全自动切题监控
     try:
         _roi = get_roi_interactive(force_reselect=args.reselect)
         _log(f"[监控区域] 已锁定: x={_roi['x']}, y={_roi['y']}, w={_roi['width']}, h={_roi['height']}")
+        # 启动全自动切题监控引擎（纯画面感知）
+        _screen_monitor = ScreenMonitor(
+            roi=_roi,
+            on_question_detected=on_auto_question_detected,
+            grab_fn=grab_roi,
+            log_fn=_log,
+        )
+        _screen_monitor.start()
     except Exception as e:
-        _log(f"[提示] 获取监控区域: {e}")
+        _log(f"[提示] 获取监控区域或启动全自动切题: {e}")
 
-    print(f"\n[监听就绪] 截题通道已激活：【鼠标滚轮中键】（零碰键盘推荐） / 【鼠标侧键】 / 【Ctrl+Shift】")
-    print(f"  * 手机看板自动更新答案，选择题用鼠标直接点击选项即可。")
+    # 3. 后台线程持续寻找辅助电脑（不阻塞本地监控启动）
+    def _discovery_worker():
+        global _secondary_url
+        if args.server:
+            _secondary_url = args.server.rstrip("/")
+            _log(f"[配置] 已手动指定辅助电脑地址: {_secondary_url}")
+            return
+        while _running and not _secondary_url:
+            url = discover_secondary_pc(timeout=3.0)
+            if url:
+                _secondary_url = url
+                _log(f"[连接成功] 辅助电脑已对齐: {_secondary_url}")
+                break
+            time.sleep(2.0)
+
+    t_disc = threading.Thread(target=_discovery_worker, daemon=True)
+    t_disc.start()
+
+    print(f"\n[监听就绪] 纯画面全自动切题已激活！")
+    print(f"  * 只要屏幕/iPad发生换题翻页，画面稳定 0.8 秒后自动保存并上传 DeepSeek！")
+    print(f"  * 手动截题保底：【鼠标滚轮中键】 / 【鼠标侧键】 / 【Ctrl+Shift】 / 【F8】随时可用。")
+    print(f"  * 【F10】快捷键随时暂停/恢复自动切题监控。")
     print(f"  * 大题/代码题按需按 [双击 Ctrl] / [Ctrl+Q] / [F9] 提取至剪切板。")
     print(f"  * 完全静音静默后台运行。")
 
     print("\n" + "#" * 65)
     print(f"【就绪】已连接至辅助电脑: {_secondary_url}")
-    print(f"  按 [Ctrl+Shift] 或 [F8] 立即截题；")
+    print(f"  换题时自动感知上传；亦可随时按【鼠标滚轮中键】手动截题；")
     print(f"  需要代码答案时按 [双击 Ctrl] 自动写入剪切板（Ctrl+V 即粘贴）。")
     print("#" * 65 + "\n")
 
@@ -496,6 +533,8 @@ def main():
         print("\n[正在退出] 用户主动终止...")
     finally:
         _running = False
+        if _screen_monitor:
+            _screen_monitor.stop()
         try:
             keyboard.unhook_all()
         except Exception:
