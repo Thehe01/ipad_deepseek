@@ -8,6 +8,8 @@ import threading
 import ctypes
 from ctypes import wintypes
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import io
+import queue
 
 import requests
 import keyboard
@@ -71,10 +73,11 @@ _secondary_url = None
 _roi = None
 _screen_monitor = None
 _lock = threading.Lock()
-_uploading = False          # 防止快捷键连按重叠上传
 _running = True
 _latest_content = ""        # 缓存辅助电脑推送过来的最新题目内容（代码/选择题/简答题等）
 _ctrl_had_other_key = False # 跟踪 Ctrl 按下期间是否有其他按键，避免组合键误触发
+_connection_ready = threading.Event()
+_upload_queue = queue.Queue(maxsize=20)
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_run.log")
 
 
@@ -266,58 +269,115 @@ def grab_roi(roi):
         raise RuntimeError(f"屏幕截图失败: {e}")
 
 
-def upload_image(image_path):
-    """通过局域网 HTTP POST 上传图片给辅助电脑"""
-    global _uploading
-    if _uploading:
-        _log("[提示] 上一张截图仍在上传中，请稍候再按快捷键...")
-        return
-    _uploading = True
-    start_t = time.time()
+def enqueue_upload(img_or_path, trigger_name="快捷键"):
+    """
+    将待上传图像（PIL.Image 或 文件路径）打包为内存 PNG 字节流加入上传队列。
+    直接在内存中传递数据，彻底杜绝多线程读写单一磁盘文件所引发的文件覆盖竞争。
+    """
     try:
-        with open(image_path, "rb") as f:
-            files = {"image": ("question.png", f, "image/png")}
-            res = requests.post(
-                f"{_secondary_url}/api/upload_question",
-                files=files,
-                proxies={"http": None, "https": None},
-                timeout=6.0,
-            )
-        elapsed_ms = int((time.time() - start_t) * 1000)
-        if res.status_code == 200:
-            _log(f"[上传成功] 全屏截图已送达辅助电脑！耗时 {elapsed_ms} 毫秒，DeepSeek R1 正在解题...")
+        if isinstance(img_or_path, str):
+            with open(img_or_path, "rb") as f:
+                img_bytes = f.read()
+        elif hasattr(img_or_path, "save"):
+            buf = io.BytesIO()
+            img_or_path.save(buf, format="PNG")
+            img_bytes = buf.getvalue()
+            # 顺便留存一份最新截图用于本地排查核对
+            try:
+                with open(TEMP_IMAGE_PATH, "wb") as f:
+                    f.write(img_bytes)
+            except Exception:
+                pass
         else:
-            _log(f"[上传警告] 辅助电脑返回异常状态码: {res.status_code}，内容: {res.text}")
+            _log(f"[{trigger_name}] 错误：不支持的图像对象类型 {type(img_or_path)}")
+            return
+
+        try:
+            _upload_queue.put_nowait((img_bytes, trigger_name, time.time()))
+        except queue.Full:
+            try:
+                _ = _upload_queue.get_nowait()
+            except Exception:
+                pass
+            _upload_queue.put_nowait((img_bytes, trigger_name, time.time()))
     except Exception as e:
-        _log(f"[上传失败] 无法发送截图至辅助电脑: {e}")
-    finally:
-        _uploading = False
+        _log(f"[{trigger_name}] 图像入队异常: {e}")
+
+
+def _upload_worker():
+    """
+    后台单线程排队上传工人：
+    1. 辅机尚未连通时自动在队列中保持等待，绝不盲目发起无效网络请求；
+    2. 严格按顺序串行上传，彻底消除多请求并发覆盖冲突；
+    3. 支持超时与网络重试。
+    """
+    global _running, _secondary_url
+    while _running:
+        try:
+            item = _upload_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        img_bytes, trigger_name, enqueue_time = item
+
+        # 若辅助电脑地址尚未发现，等待网络对齐（最多等待 15 秒）
+        if not _secondary_url:
+            _log(f"[{trigger_name}] 辅助电脑连接尚未就绪，截图已在队列暂存，正在等待网络对齐...")
+            wait_start = time.time()
+            while _running and not _secondary_url and (time.time() - wait_start < 15.0):
+                if _connection_ready.wait(timeout=0.5):
+                    break
+
+        if not _secondary_url:
+            _log(f"[{trigger_name}] ⚠️ 等待超时：辅助电脑仍未上线，该题暂未能上传。")
+            _upload_queue.task_done()
+            continue
+
+        start_t = time.time()
+        for attempt in range(1, 3):
+            try:
+                files = {"image": ("question.png", img_bytes, "image/png")}
+                res = requests.post(
+                    f"{_secondary_url}/api/upload_question",
+                    files=files,
+                    proxies={"http": None, "https": None},
+                    timeout=7.0,
+                )
+                elapsed_ms = int((time.time() - start_t) * 1000)
+                if res.status_code == 200:
+                    _log(f"[{trigger_name}] ✅ 截图已送达辅助电脑！耗时 {elapsed_ms} 毫秒，DeepSeek R1 正在解题...")
+                    break
+                else:
+                    _log(f"[{trigger_name}] ⚠️ 辅机返回状态码 {res.status_code}: {res.text}")
+            except Exception as e:
+                if attempt < 2 and _running:
+                    time.sleep(0.8)
+                    continue
+                _log(f"[{trigger_name}] ❌ 上传请求失败: {e}")
+
+        _upload_queue.task_done()
 
 
 def on_hotkey_trigger(trigger_name="快捷键"):
-    """快捷键/鼠标中键回调：截图 → 保存 → 异步上传"""
-    global _roi, _secondary_url, _screen_monitor
-    if _secondary_url is None or _roi is None:
-        _log("[提示] 尚未就绪，请稍候...")
+    """快捷键/鼠标中键回调：内存抓图 → 同步基准帧 → 入队异步上传"""
+    global _roi, _screen_monitor
+    if _roi is None:
+        _log("[提示] 尚未设定监控区域，请稍候...")
         return
-    _log(f"[{trigger_name}触发] 正在截取监控区域并发送给辅助电脑...")
+    _log(f"[{trigger_name}触发] 正在抓取画面并送入上传队列...")
 
     try:
         img = grab_roi(_roi)
-        img.save(TEMP_IMAGE_PATH, format="PNG")
-        _log(f"[截图保存成功] {TEMP_IMAGE_PATH}")
         if _screen_monitor:
             _screen_monitor.sync_ref_frame(img)
+        enqueue_upload(img, trigger_name=trigger_name)
     except Exception as e:
-        _log(f"[截图失败] {e}")
-        return
-    # 在新线程中上传，不阻塞热键监听
-    threading.Thread(target=upload_image, args=(TEMP_IMAGE_PATH,), daemon=True).start()
+        _log(f"[{trigger_name}失败] {e}")
 
 
-def on_auto_question_detected(image_path, is_manual=False):
-    """全自动画面翻页感知回调：自动上传截图"""
-    threading.Thread(target=upload_image, args=(image_path,), daemon=True).start()
+def on_auto_question_detected(raw_img, is_manual=False, trigger_name="自动翻页感知"):
+    """全自动画面翻页感知回调：直接将内存图像送入上传队列"""
+    enqueue_upload(raw_img, trigger_name=trigger_name)
 
 
 def _win32_hotkey_polling_loop():
@@ -439,7 +499,7 @@ def _kill_previous_instances():
 
 
 def main():
-    global _secondary_url, _roi, _running, _ctrl_had_other_key
+    global _secondary_url, _roi, _running, _ctrl_had_other_key, _screen_monitor
 
     # 清理之前可能遗留的旧后台实例，杜绝端口冲突或多实例并发
     _kill_previous_instances()
@@ -450,7 +510,7 @@ def main():
     print("      【主电脑端】全自动翻页截题 → 局域网秒级直传辅助电脑")
     print("=" * 65)
     print(f"  [全自动感知切题]      默认开启！画面翻页稳定 0.8s 自动保存上传（完全零按键）")
-    print(f"  [鼠标滚轮中键]        点击滚轮中键手动立即截题保底（手不离鼠标，防监考检测）")
+    print(f"  [鼠标滚轮中键]        点击滚轮中键手动立即截题保底（手不离鼠标）")
     print(f"  [鼠标侧键]            点击侧键亦可截题（前进/后退键）")
     print(f"  [Ctrl+Shift] 或 [F8]  键盘截题备选通道")
     print(f"  [F10]                暂停/恢复全自动切题监控")
@@ -464,6 +524,10 @@ def main():
     clipboard_srv = ClipboardServer()
     clipboard_srv.start()
     _log(f"[内容接收服务] 监听端口 {clipboard_srv.port}（默认不改动剪切板，快捷键触发拷贝）")
+
+    # 0.5 启动后台单线程排队上传服务（内存直接传递、自动等待连接就绪）
+    t_upload = threading.Thread(target=_upload_worker, daemon=True)
+    t_upload.start()
 
     # 1. 立即启动全局热键监听线程与备用热键（杜绝网络发现阻塞热键启动）
     t_poll = threading.Thread(target=_win32_hotkey_polling_loop, daemon=True)
@@ -500,12 +564,14 @@ def main():
         global _secondary_url
         if args.server:
             _secondary_url = args.server.rstrip("/")
+            _connection_ready.set()
             _log(f"[配置] 已手动指定辅助电脑地址: {_secondary_url}")
             return
         while _running and not _secondary_url:
             url = discover_secondary_pc(timeout=3.0)
             if url:
                 _secondary_url = url
+                _connection_ready.set()
                 _log(f"[连接成功] 辅助电脑已对齐: {_secondary_url}")
                 break
             time.sleep(2.0)
