@@ -90,8 +90,20 @@ class _BITMAPINFOHEADER(ctypes.Structure):
     ]
 
 
+def _ensure_input_desktop():
+    """确保当前线程附加到用户的真实交互桌面 (Default)，防止多桌面隔离或后台调度导致截图黑屏或鼠标坐标归零"""
+    try:
+        u32 = ctypes.windll.user32
+        h_input = u32.OpenInputDesktop(0, False, 0x01FF)
+        if h_input:
+            u32.SetThreadDesktop(h_input)
+    except Exception:
+        pass
+
+
 def _capture_gdi(x, y, w, h):
     """通过 DISPLAY 设备上下文直接拷贝显存，兼容性最强、速度最快"""
+    _ensure_input_desktop()
     hdc_screen = _gdi.CreateDCA(b"DISPLAY", None, None, None)
     if not hdc_screen:
         raise RuntimeError("CreateDCA DISPLAY failed")
@@ -132,6 +144,7 @@ def parse_args():
 
 def grab_roi(roi):
     """截取指定 ROI 区域，优先使用原生 GDI 拷贝，失败时回退 PIL"""
+    _ensure_input_desktop()
     x, y, w, h = int(roi["x"]), int(roi["y"]), int(roi["width"]), int(roi["height"])
     try:
         return _capture_gdi(x, y, w, h)

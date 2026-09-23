@@ -48,12 +48,23 @@ except Exception:
 
 _user32 = ctypes.windll.user32
 
+def _ensure_input_desktop():
+    """确保当前线程附加到用户的真实交互桌面 (Default)，防止多桌面隔离导致坐标或截图失效"""
+    try:
+        h_input = _user32.OpenInputDesktop(0, False, 0x01FF)
+        if h_input:
+            _user32.SetThreadDesktop(h_input)
+    except Exception:
+        pass
+
 def _get_cursor_pos():
+    _ensure_input_desktop()
     pt = wintypes.POINT()
     _user32.GetCursorPos(ctypes.byref(pt))
     return int(pt.x), int(pt.y)
 
 def _get_screen_size():
+    _ensure_input_desktop()
     return int(_user32.GetSystemMetrics(0)), int(_user32.GetSystemMetrics(1))
 
 
