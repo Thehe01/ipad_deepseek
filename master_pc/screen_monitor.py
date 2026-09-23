@@ -47,21 +47,50 @@ except Exception:
     pass
 
 _user32 = ctypes.windll.user32
+_kernel32 = ctypes.windll.kernel32
+_user32.GetThreadDesktop.restype = wintypes.HDESK
+_user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+_user32.OpenInputDesktop.restype = wintypes.HDESK
+_user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+_user32.SetThreadDesktop.restype = wintypes.BOOL
+_user32.SetThreadDesktop.argtypes = [wintypes.HDESK]
+
+_tls = threading.local()
+
 
 def _ensure_input_desktop():
-    """确保当前线程附加到用户的真实交互桌面 (Default)，防止多桌面隔离导致坐标或截图失效"""
+    """
+    确保当前线程附加到用户的真实交互桌面 (Default)。
+    采用线程本地状态与无分配桌面名比对，彻底杜绝句柄泄漏：
+    1. 若本线程已成功挂载，直接 O(1) 返回；
+    2. 若线程桌面已是 Default，直接标记已挂载，0 次创建句柄；
+    3. 仅在桌面隔离时调用一次 OpenInputDesktop + SetThreadDesktop。
+    """
+    if getattr(_tls, "attached", False):
+        return
     try:
+        tid = _kernel32.GetCurrentThreadId()
+        h_thread = _user32.GetThreadDesktop(tid)
+        buf = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if _user32.GetUserObjectInformationW(h_thread, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+            if buf.value.lower() == "default":
+                _tls.attached = True
+                return
         h_input = _user32.OpenInputDesktop(0, False, 0x01FF)
         if h_input:
-            _user32.SetThreadDesktop(h_input)
+            if _user32.SetThreadDesktop(h_input):
+                _tls.attached = True
     except Exception:
         pass
+
 
 def _get_cursor_pos():
     _ensure_input_desktop()
     pt = wintypes.POINT()
     _user32.GetCursorPos(ctypes.byref(pt))
     return int(pt.x), int(pt.y)
+
 
 def _get_screen_size():
     _ensure_input_desktop()
@@ -312,8 +341,8 @@ class ScreenMonitor:
                 sw, sh = _get_screen_size()
 
                 # 1. 判定是否处于触发区：
-                # A. 屏幕右上角区域（默认宽度 120px、高度 80px，面积适中）
-                in_top_right = (mx >= sw - self.mouse_corner_w) and (0 <= my <= self.mouse_corner_h)
+                # A. 屏幕右上角区域（严格限定主屏幕物理右上角：增加 X 轴上限 sw，杜绝右侧副屏误触发）
+                in_top_right = (sw - self.mouse_corner_w <= mx <= sw) and (0 <= my <= self.mouse_corner_h)
 
                 # B. 自定义框选的区域（若配置了）
                 in_custom = False
@@ -340,18 +369,21 @@ class ScreenMonitor:
                                 f"(坐标: {mx}, {my})，立即截屏送题！"
                             )
                             self._last_mouse_trigger_time = now
-                            self._corner_already_triggered = True  # 标记当前停留已触发，离开前不再重复触发
 
                             try:
                                 raw = self._grab_raw()
+                                if self.on_question_detected:
+                                    self.on_question_detected(raw, is_manual=False, trigger_name=f"鼠标停留{location_desc}")
                                 self.sync_ref_frame(raw)
                                 self.last_snap_time = time.time()
                                 self.state = "IDLE"
+                                self._corner_already_triggered = True  # 仅在抓图与投递成功后才标记锁存，防止失败后死锁不重试
                                 self._log(f"[鼠标截题成功] 题目画面捕获完成，已送入上传队列！")
-                                if self.on_question_detected:
-                                    self.on_question_detected(raw, is_manual=False, trigger_name=f"鼠标停留{location_desc}")
                             except Exception as e:
-                                self._log(f"[鼠标截题异常] 抓取题目画面失败: {e}")
+                                # 失败分支：不锁定已触发状态，允许鼠标继续停留在触发区时在 1 秒后自动重新尝试
+                                self._corner_already_triggered = False
+                                self._last_mouse_trigger_time = now - self.mouse_trigger_cooldown + 1.0
+                                self._log(f"[鼠标截题异常] 截屏或入队失败: {e}，将在 1 秒后自动重试...")
                 else:
                     # 鼠标移出触发区，重置计时器与触发标记，重新就绪！
                     self._hover_start_time = 0.0

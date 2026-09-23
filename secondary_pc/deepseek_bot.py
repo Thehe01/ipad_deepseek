@@ -259,22 +259,30 @@ class DeepSeekBot:
             time.sleep(2.0)
 
     def _ensure_r1_enabled(self, page):
-        """确保 DeepSeek 网页端的「深度思考 (R1)」开关已激活"""
+        """确保 DeepSeek 网页端的「深度思考 (R1)」开关已激活（无阻塞纯 JS 快速核验，耗时 < 5ms）"""
+        if not ENABLE_R1:
+            return
         try:
-            time.sleep(1.0)
-            r1_button = page.locator('button:has-text("深度思考"), div:has-text("深度思考 (R1)")').first
-            if r1_button.count() > 0 and r1_button.is_visible():
-                class_attr = r1_button.get_attribute("class") or ""
-                aria_checked = r1_button.get_attribute("aria-checked") or ""
-                is_active = "active" in class_attr.lower() or aria_checked == "true"
-                
-                if not is_active:
-                    r1_button.click()
-                    print("[DeepSeek] 已自动开启「深度思考 (R1)」模式。")
-                else:
-                    print("[DeepSeek]「深度思考 (R1)」模式已经是激活状态。")
-        except Exception as e:
-            print(f"[提示] 检查 R1 开关提示: {e}")
+            switched = page.evaluate("""() => {
+                const btns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                const r1Btn = btns.find(b => {
+                    const text = (b.innerText || '') + (b.getAttribute('aria-label') || '');
+                    return text.includes('深度思考') || text.includes('DeepThink');
+                });
+                if (!r1Btn) return false;
+                const cls = (r1Btn.className || '').toLowerCase();
+                const aria = r1Btn.getAttribute('aria-checked') || '';
+                const isActive = cls.includes('active') || aria === 'true';
+                if (!isActive) {
+                    r1Btn.click();
+                    return true;
+                }
+                return false;
+            }""")
+            if switched:
+                print("[DeepSeek] 已自动激活「深度思考 (R1)」模式。")
+        except Exception:
+            pass
 
     def _inject_system_prompt(self, page):
         """在会话初始时发送系统提示词，确立全局答题最高规范"""
@@ -296,7 +304,8 @@ class DeepSeekBot:
         """执行上传图片与发送 Prompt 的具体动作，包含发送前清理、发送按钮点击与闭环验证"""
         print(f"\n[DeepSeek] 准备投递题目截图: {os.path.basename(image_path)} ...")
 
-        # 1. 发送前预清理：若上一题仍在生成先点击停止，并清空输入框遗留的历史附件，杜绝多图堆积
+        # 1. 发送前预清理与 R1 状态核验（无延迟即时校验）：确保 R1 激活、清空遗留历史附件
+        self._ensure_r1_enabled(page)
         page.evaluate("""() => {
             const stopBtn = Array.from(document.querySelectorAll('button, div[role="button"]')).find(b => {
                 const t = (b.innerText || '') + (b.getAttribute('aria-label') || '');
@@ -588,10 +597,6 @@ class DeepSeekBot:
         if self.on_answer_callback:
             self.on_answer_callback(last_answer)
 
-        # 2. 答案发布完成后，在后台为下一题检查并确保「深度思考 (R1)」开关已激活
-        if ENABLE_R1:
-            try:
-                time.sleep(0.5)
-                self._ensure_r1_enabled(page)
-            except Exception:
-                pass
+        # 答案生成并发布完成，函数立即返回！
+        # 绝不在此同步 sleep 阻塞工作线程，让队列立刻能够消费下一题！
+        return

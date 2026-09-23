@@ -21,18 +21,15 @@ except Exception:
 u32 = ctypes.windll.user32
 u32.SetProcessDPIAware()
 
-# 附加到交互桌面
-h_input = u32.OpenInputDesktop(0, False, 0x01FF)
-if h_input:
-    u32.SetThreadDesktop(h_input)
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(BASE_DIR, "master_pc"))
 
-from master_main import grab_roi
+from master_main import grab_roi, _ensure_input_desktop
 from screen_monitor import ScreenMonitor, _get_cursor_pos, _get_screen_size
 import numpy as np
 from PIL import Image
+
+_ensure_input_desktop()
 
 
 def main():
@@ -59,14 +56,26 @@ def main():
     save_path = os.path.join(BASE_DIR, "temp_test_screenshot.png")
     img.save(save_path)
 
+    mean_val = float(arr.mean())
+    max_val = int(arr.max())
+    std_val = float(arr.std())
+
     print(f"   - 截屏耗时:   {cost_ms:.2f} ms", flush=True)
     print(f"   - 图片尺寸:   {img.size[0]} x {img.size[1]} ({img.mode})", flush=True)
-    print(f"   - 像素均值:   {arr.mean():.2f} (有效色彩内容，无黑屏)", flush=True)
+    print(f"   - 像素统计:   均值={mean_val:.2f}, 最大值={max_val}, 标准差={std_val:.2f}", flush=True)
     print(f"   - 图片已保存: {save_path}", flush=True)
-    print("   -> [通过] 原生 GDI 显存截图工作正常！\n", flush=True)
+
+    # 严密校验画面有效性：彻底防范全黑图 / 假通过
+    is_valid = (mean_val >= 3.0 and max_val >= 10 and std_val >= 0.8)
+    if not is_valid:
+        print(f"\n   ❌ 【校验失败】截取到的画面为纯黑屏或全空图 (均值={mean_val:.2f}, 最大值={max_val})！", flush=True)
+        print("      可能原因：当前屏幕处于锁屏状态、桌面受隔离保护或 GDI 显存拷贝异常。", flush=True)
+        sys.exit(1)
+
+    print("   -> ✅ [通过] 画面校验正常（有效色彩与界面元素，非纯黑屏）！\n", flush=True)
 
     if "--check-only" in sys.argv:
-        print(">> 已指定 --check-only 参数，测试顺利完成！", flush=True)
+        print(">> 已指定 --check-only 参数，且画面真实有效，测试顺利通过！", flush=True)
         return
 
     # 2. 交互式鼠标右上角停留 0.3s 截题验证

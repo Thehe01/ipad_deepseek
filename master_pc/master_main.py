@@ -90,13 +90,35 @@ class _BITMAPINFOHEADER(ctypes.Structure):
     ]
 
 
+_user32 = ctypes.windll.user32
+_kernel32 = ctypes.windll.kernel32
+_user32.GetThreadDesktop.restype = wintypes.HDESK
+_user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+_user32.OpenInputDesktop.restype = wintypes.HDESK
+_user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+_user32.SetThreadDesktop.restype = wintypes.BOOL
+_user32.SetThreadDesktop.argtypes = [wintypes.HDESK]
+
+_tls = threading.local()
+
+
 def _ensure_input_desktop():
     """确保当前线程附加到用户的真实交互桌面 (Default)，防止多桌面隔离或后台调度导致截图黑屏或鼠标坐标归零"""
+    if getattr(_tls, "attached", False):
+        return
     try:
-        u32 = ctypes.windll.user32
-        h_input = u32.OpenInputDesktop(0, False, 0x01FF)
+        tid = _kernel32.GetCurrentThreadId()
+        h_thread = _user32.GetThreadDesktop(tid)
+        buf = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if _user32.GetUserObjectInformationW(h_thread, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+            if buf.value.lower() == "default":
+                _tls.attached = True
+                return
+        h_input = _user32.OpenInputDesktop(0, False, 0x01FF)
         if h_input:
-            u32.SetThreadDesktop(h_input)
+            if _user32.SetThreadDesktop(h_input):
+                _tls.attached = True
     except Exception:
         pass
 
