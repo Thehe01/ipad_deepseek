@@ -54,6 +54,8 @@ _user32.OpenInputDesktop.restype = wintypes.HDESK
 _user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 _user32.SetThreadDesktop.restype = wintypes.BOOL
 _user32.SetThreadDesktop.argtypes = [wintypes.HDESK]
+_user32.CloseDesktop.restype = wintypes.BOOL
+_user32.CloseDesktop.argtypes = [wintypes.HDESK]
 
 _tls = threading.local()
 
@@ -64,7 +66,8 @@ def _ensure_input_desktop():
     采用线程本地状态与无分配桌面名比对，彻底杜绝句柄泄漏：
     1. 若本线程已成功挂载，直接 O(1) 返回；
     2. 若线程桌面已是 Default，直接标记已挂载，0 次创建句柄；
-    3. 仅在桌面隔离时调用一次 OpenInputDesktop + SetThreadDesktop。
+    3. 仅在桌面隔离时调用一次 OpenInputDesktop + SetThreadDesktop；
+    4. 若 SetThreadDesktop 失败，必须调用 CloseDesktop 释放该新创建但未使用的句柄！
     """
     if getattr(_tls, "attached", False):
         return
@@ -81,6 +84,8 @@ def _ensure_input_desktop():
         if h_input:
             if _user32.SetThreadDesktop(h_input):
                 _tls.attached = True
+            else:
+                _user32.CloseDesktop(h_input)
     except Exception:
         pass
 
@@ -341,8 +346,8 @@ class ScreenMonitor:
                 sw, sh = _get_screen_size()
 
                 # 1. 判定是否处于触发区：
-                # A. 屏幕右上角区域（严格限定主屏幕物理右上角：增加 X 轴上限 sw，杜绝右侧副屏误触发）
-                in_top_right = (sw - self.mouse_corner_w <= mx <= sw) and (0 <= my <= self.mouse_corner_h)
+                # A. 屏幕右上角区域（严格限定主屏幕物理右上角：mx 严格小于 sw，杜绝右侧副屏起始列 x=sw 误触发）
+                in_top_right = (sw - self.mouse_corner_w <= mx < sw) and (0 <= my <= self.mouse_corner_h)
 
                 # B. 自定义框选的区域（若配置了）
                 in_custom = False

@@ -98,6 +98,8 @@ _user32.OpenInputDesktop.restype = wintypes.HDESK
 _user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 _user32.SetThreadDesktop.restype = wintypes.BOOL
 _user32.SetThreadDesktop.argtypes = [wintypes.HDESK]
+_user32.CloseDesktop.restype = wintypes.BOOL
+_user32.CloseDesktop.argtypes = [wintypes.HDESK]
 
 _tls = threading.local()
 
@@ -119,6 +121,8 @@ def _ensure_input_desktop():
         if h_input:
             if _user32.SetThreadDesktop(h_input):
                 _tls.attached = True
+            else:
+                _user32.CloseDesktop(h_input)
     except Exception:
         pass
 
@@ -323,7 +327,7 @@ def enqueue_upload(img_or_path, trigger_name="快捷键"):
                 pass
         else:
             _log(f"[{trigger_name}] 错误：不支持的图像对象类型 {type(img_or_path)}")
-            return
+            raise TypeError(f"不支持的图像对象类型 {type(img_or_path)}")
 
         # 逐任务原子持久化落盘
         os.makedirs(PENDING_UPLOAD_DIR, exist_ok=True)
@@ -343,6 +347,7 @@ def enqueue_upload(img_or_path, trigger_name="快捷键"):
         _upload_queue.put((img_bytes, trigger_name, now_ts, file_path, meta_path))
     except Exception as e:
         _log(f"[{trigger_name}] 图像入队/持久化异常: {e}")
+        raise
 
 
 def _upload_worker():

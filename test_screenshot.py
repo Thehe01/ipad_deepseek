@@ -41,7 +41,7 @@ def main():
     mx, my = _get_cursor_pos()
     print(f"  * 屏幕物理分辨率: {sw} x {sh}", flush=True)
     print(f"  * 当前鼠标坐标:   ({mx}, {my})", flush=True)
-    print(f"  * 右上角触发区域: X: [{sw - 120} ~ {sw}], Y: [0 ~ 80]", flush=True)
+    print(f"  * 右上角触发区域: X: [{sw - 120} ~ {sw - 1}], Y: [0 ~ 80]", flush=True)
     print("=" * 68 + "\n", flush=True)
 
     # 1. 基础全屏 / ROI 截图验证
@@ -120,12 +120,14 @@ def main():
             time.sleep(0.05)
             now = time.time()
             cx, cy = _get_cursor_pos()
-            in_corner = (cx >= sw - 120) and (0 <= cy <= 80)
+            in_corner = (sw - 120 <= cx < sw) and (0 <= cy <= 80)
             
             if now - last_print >= 0.2:
                 last_print = now
                 if in_corner:
                     status = "【已进入右上角！保持停顿 0.3s...】"
+                elif cx >= sw:
+                    status = f"【当前光标在右侧副屏 (X={cx})，请移回主屏幕】"
                 else:
                     dx = max(0, (sw - 120) - cx)
                     dy = max(0, cy - 80)
