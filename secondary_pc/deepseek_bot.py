@@ -140,6 +140,9 @@ class DeepSeekBot:
                 # 向当前会话注入全局系统规则提示词
                 self._inject_system_prompt(page)
 
+                # 恢复历史由于崩溃或退出未完成的排队图片
+                self._recover_pending_tasks()
+
                 # 通知主线程已完全就绪
                 self.ready_event.set()
 
@@ -155,19 +158,38 @@ class DeepSeekBot:
                     elif task_type == "SEND_QUESTION":
                         self.is_busy = True
                         task_img = payload.get("image_path")
+                        retry_count = payload.get("retry_count", 0)
+                        send_success = False
                         try:
                             self._do_send_question(page, task_img, payload["prompt"])
+                            send_success = True
                         except Exception as e:
                             print(f"[错误] 发送题目失败: {e}")
+                            if self.on_status_callback:
+                                self.on_status_callback(f"⚠️ 题目发送失败: {e}")
                         finally:
                             self.is_busy = False
-                            # 清理任务专属独立临时文件（不影响公共预览文件），避免磁盘堆积
-                            try:
-                                if task_img and os.path.exists(task_img) and os.path.abspath(task_img) != os.path.abspath(TEMP_RECEIVED_IMAGE):
-                                    os.remove(task_img)
-                            except Exception:
-                                pass
-                            self.task_queue.task_done()
+                            if send_success:
+                                # 只有真正成功完成发送与生成，才清理专属临时文件并结束任务
+                                try:
+                                    if task_img and os.path.exists(task_img) and os.path.abspath(task_img) != os.path.abspath(TEMP_RECEIVED_IMAGE):
+                                        os.remove(task_img)
+                                except Exception:
+                                    pass
+                                self.task_queue.task_done()
+                            else:
+                                # 发送失败分支：绝不删除图片！保留图片文件，重新入队重试或保留供人工恢复
+                                MAX_RETRIES = 3
+                                if retry_count < MAX_RETRIES and self.is_running:
+                                    payload["retry_count"] = retry_count + 1
+                                    print(f"[DeepSeek] ⚠️ 任务失败，已完整保留图片文件 ({task_img})，3 秒后自动重新入队重试 (第 {payload['retry_count']}/{MAX_RETRIES} 次)...")
+                                    time.sleep(3.0)
+                                    if self.is_running:
+                                        self.task_queue.put(("SEND_QUESTION", payload))
+                                    self.task_queue.task_done()
+                                else:
+                                    print(f"[DeepSeek] ❌ 任务重试 {MAX_RETRIES} 次仍失败，保留原题目文件供排查与恢复: {task_img}")
+                                    self.task_queue.task_done()
 
                 try:
                     context.close()
@@ -177,6 +199,24 @@ class DeepSeekBot:
             self.error = e
             print(f"\n[错误] 浏览器引擎异常: {e}")
             self.ready_event.set()
+
+    def _recover_pending_tasks(self):
+        """扫描 received_questions 目录，将历史由于异常退出未完成的图片重新排队"""
+        if not os.path.exists(RECEIVED_DIR):
+            return
+        leftovers = []
+        try:
+            for fname in os.listdir(RECEIVED_DIR):
+                if fname.startswith("task_") and fname.endswith(".png"):
+                    p = os.path.join(RECEIVED_DIR, fname)
+                    leftovers.append((os.path.getmtime(p), p))
+            leftovers.sort(key=lambda x: x[0])
+            for _, p in leftovers:
+                self.send_question(p)
+            if leftovers:
+                print(f"[DeepSeek] [启动恢复] 发现 {len(leftovers)} 道历史未完成处理题目，已自动恢复排队！")
+        except Exception as e:
+            print(f"[DeepSeek] [启动恢复] 扫描历史任务异常: {e}")
 
     def _wait_for_login(self, page):
         """检查登录状态并等待用户完成首次登录"""
@@ -358,8 +398,8 @@ class DeepSeekBot:
                 }
             }""")
             if self.on_status_callback:
-                self.on_status_callback("⚠️ 发送未响应，已自动清空输入框，可按 F8 重试")
-            return
+                self.on_status_callback("⚠️ 题目发送未响应，已自动清空输入框，正在准备重试...")
+            raise RuntimeError("题目未能成功触发发送（输入框无响应或发送按钮未生效）")
 
         if self.on_status_callback:
             self.on_status_callback("🟡 DeepSeek R1 正在深度思考解题...")

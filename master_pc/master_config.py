@@ -11,6 +11,9 @@ MASTER_CONFIG_FILE = os.path.join(BASE_DIR, "master_config.json")
 # 本地最新截图调试留存路径
 TEMP_IMAGE_PATH = os.path.join(BASE_DIR, "temp_capture.png")
 
+# 主机待发送截图专属持久化目录（逐任务落盘，杜绝重启或崩溃丢图）
+PENDING_UPLOAD_DIR = os.path.join(BASE_DIR, "pending_uploads")
+
 # 画面变动触发阈值（0.06 表示 6% 的灰度差异率，用于识别题目文字与布局大面积变动，滤除微弱噪点）
 DIFF_THRESHOLD = 0.06
 

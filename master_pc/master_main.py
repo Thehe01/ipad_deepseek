@@ -10,6 +10,8 @@ from ctypes import wintypes
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import io
 import queue
+import json
+import uuid
 
 import requests
 import keyboard
@@ -20,6 +22,7 @@ from master_config import (
     ROI_CONFIG_FILE,
     TEMP_IMAGE_PATH,
     CLIPBOARD_SERVER_PORT,
+    PENDING_UPLOAD_DIR,
 )
 from discovery import discover_secondary_pc
 from roi_selector import get_roi_interactive
@@ -269,10 +272,86 @@ def grab_roi(roi):
         raise RuntimeError(f"屏幕截图失败: {e}")
 
 
+def _clean_persisted_file(file_path, meta_path):
+    """当题目确认成功上传或被客户端错误明确拒绝后，安全清除本地持久化文件"""
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception:
+        pass
+    try:
+        if meta_path and os.path.exists(meta_path):
+            os.remove(meta_path)
+    except Exception:
+        pass
+
+
+def recover_pending_uploads():
+    """
+    启动时扫描 pending_uploads 目录，将上次进程退出或异常中断未送达的截图恢复至上传队列。
+    严格按时间戳先后顺序排队，杜绝进程退出或崩溃导致的题目丢失。
+    """
+    os.makedirs(PENDING_UPLOAD_DIR, exist_ok=True)
+    recovered = []
+    try:
+        for fname in os.listdir(PENDING_UPLOAD_DIR):
+            if fname.endswith(".json"):
+                meta_path = os.path.join(PENDING_UPLOAD_DIR, fname)
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    img_file = meta.get("image_file")
+                    file_path = os.path.join(PENDING_UPLOAD_DIR, img_file)
+                    if os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            img_bytes = f.read()
+                        recovered.append((
+                            meta.get("enqueue_time", os.path.getmtime(file_path)),
+                            img_bytes,
+                            meta.get("trigger_name", "历史待发截图"),
+                            file_path,
+                            meta_path,
+                        ))
+                except Exception:
+                    pass
+
+        # 兜底：检查没有 json 的孤儿 png
+        for fname in os.listdir(PENDING_UPLOAD_DIR):
+            if fname.endswith(".png"):
+                file_path = os.path.join(PENDING_UPLOAD_DIR, fname)
+                base_name = os.path.splitext(fname)[0]
+                meta_path = os.path.join(PENDING_UPLOAD_DIR, f"{base_name}.json")
+                if not os.path.exists(meta_path) and not any(r[3] == file_path for r in recovered):
+                    try:
+                        with open(file_path, "rb") as f:
+                            img_bytes = f.read()
+                        recovered.append((
+                            os.path.getmtime(file_path),
+                            img_bytes,
+                            "历史待发截图",
+                            file_path,
+                            None,
+                        ))
+                    except Exception:
+                        pass
+
+        # 按时间升序排序，严格保证题目先后顺序
+        recovered.sort(key=lambda x: x[0])
+        for enq_t, img_bytes, t_name, f_path, m_path in recovered:
+            _upload_queue.put((img_bytes, t_name, enq_t, f_path, m_path))
+
+        if recovered:
+            _log(f"[启动恢复] 发现 {len(recovered)} 张历史未送达截图，已自动恢复至上传队列排队等待发送！")
+    except Exception as e:
+        _log(f"[启动恢复] 扫描未完成任务异常: {e}")
+
+
 def enqueue_upload(img_or_path, trigger_name="快捷键"):
     """
-    将待上传图像（PIL.Image 或 文件路径）打包为内存 PNG 字节流加入上传队列。
-    直接在内存中传递数据，彻底杜绝多线程读写单一磁盘文件所引发的文件覆盖竞争。
+    将待上传图像打包为内存 PNG 字节流，并立即持久化落盘至 pending_uploads 目录。
+    1. 逐任务保存独立持久化文件，彻底杜绝进程退出、崩溃或断电导致的未发送截图丢失；
+    2. 加入内存上传队列排队等待发送；
+    3. 仅在辅助电脑确认成功接收（HTTP 200）后才删除对应磁盘文件。
     """
     try:
         if isinstance(img_or_path, str):
@@ -292,9 +371,26 @@ def enqueue_upload(img_or_path, trigger_name="快捷键"):
             _log(f"[{trigger_name}] 错误：不支持的图像对象类型 {type(img_or_path)}")
             return
 
-        _upload_queue.put((img_bytes, trigger_name, time.time()))
+        # 逐任务持久化落盘
+        os.makedirs(PENDING_UPLOAD_DIR, exist_ok=True)
+        now_ts = time.time()
+        task_id = f"pending_{int(now_ts * 1000)}_{uuid.uuid4().hex[:6]}"
+        file_path = os.path.join(PENDING_UPLOAD_DIR, f"{task_id}.png")
+        meta_path = os.path.join(PENDING_UPLOAD_DIR, f"{task_id}.json")
+
+        with open(file_path, "wb") as f:
+            f.write(img_bytes)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "task_id": task_id,
+                "trigger_name": trigger_name,
+                "enqueue_time": now_ts,
+                "image_file": f"{task_id}.png",
+            }, f, ensure_ascii=False)
+
+        _upload_queue.put((img_bytes, trigger_name, now_ts, file_path, meta_path))
     except Exception as e:
-        _log(f"[{trigger_name}] 图像入队异常: {e}")
+        _log(f"[{trigger_name}] 图像入队/持久化异常: {e}")
 
 
 def _upload_worker():
@@ -303,7 +399,8 @@ def _upload_worker():
     1. 每次成功 get() 使用 try...finally 保证且仅保证调用一次 task_done()（杜绝退出时重复扣减未完成计数）；
     2. 辅机尚未连通时在队列中持久等待，绝不因超时抛弃题目；
     3. 严格按顺序串行上传，保证题目顺序与完整性；
-    4. 遇到网络波动、辅机未就绪或临时断开时持续重试，直到成功送达（或遇到不可恢复的 4xx 客户端错误、或系统退出）。
+    4. 遇到网络波动、辅机未就绪或临时断开时持续重试，直到成功送达（或遇到不可恢复的 4xx 客户端错误、或系统退出）；
+    5. 仅在辅机确认收到（200 OK）或明确拒绝（4xx）后，才清除对应本地持久化文件，保证崩溃/断电不丢题。
     """
     global _running, _secondary_url
     while _running:
@@ -313,7 +410,11 @@ def _upload_worker():
             continue
 
         try:
-            img_bytes, trigger_name, enqueue_time = item
+            if len(item) == 5:
+                img_bytes, trigger_name, enqueue_time, file_path, meta_path = item
+            else:
+                img_bytes, trigger_name, enqueue_time = item[:3]
+                file_path, meta_path = None, None
 
             # 1. 若辅助电脑尚未就绪，在队列中持续等待辅机上线，绝不抛弃当前题目
             if not _secondary_url:
@@ -340,9 +441,11 @@ def _upload_worker():
                     elapsed_ms = int((time.time() - start_t) * 1000)
                     if res.status_code == 200:
                         _log(f"[{trigger_name}] ✅ 截图已送达辅助电脑！耗时 {elapsed_ms} 毫秒，DeepSeek R1 正在解题...")
+                        _clean_persisted_file(file_path, meta_path)
                         break
                     elif 400 <= res.status_code < 500:
                         _log(f"[{trigger_name}] ❌ 辅机返回客户端错误 {res.status_code}: {res.text}，跳过此题。")
+                        _clean_persisted_file(file_path, meta_path)
                         break
                     else:
                         _log(f"[{trigger_name}] ⚠️ 辅机返回服务状态码 {res.status_code}，将在 2 秒后持续重试 (第 {attempt} 次)...")
@@ -524,6 +627,9 @@ def main():
     clipboard_srv = ClipboardServer()
     clipboard_srv.start()
     _log(f"[内容接收服务] 监听端口 {clipboard_srv.port}（默认不改动剪切板，快捷键触发拷贝）")
+
+    # 0.4 恢复历史进程遗留的未发送截图（杜绝进程退出丢失）
+    recover_pending_uploads()
 
     # 0.5 启动后台单线程排队上传服务（内存直接传递、自动等待连接就绪）
     t_upload = threading.Thread(target=_upload_worker, daemon=True)
