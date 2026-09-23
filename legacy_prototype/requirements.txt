@@ -1,0 +1,7 @@
+playwright>=1.40.0
+pillow>=10.0.0
+numpy>=1.24.0
+keyboard>=0.13.5
+mss>=9.0.0
+qrcode>=7.4.0
+
