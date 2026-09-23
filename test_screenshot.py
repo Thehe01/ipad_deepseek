@@ -36,19 +36,19 @@ from PIL import Image
 
 
 def main():
-    print("=" * 68)
-    print("      【本地截屏与右上角鼠标停留截题 · 验证工具】")
-    print("=" * 68)
+    print("=" * 68, flush=True)
+    print("      【本地截屏与右上角鼠标停留截题 · 验证工具】", flush=True)
+    print("=" * 68, flush=True)
 
     sw, sh = _get_screen_size()
     mx, my = _get_cursor_pos()
-    print(f"  * 屏幕物理分辨率: {sw} x {sh}")
-    print(f"  * 当前鼠标坐标:   ({mx}, {my})")
-    print(f"  * 右上角触发区域: X: [{sw - 120} ~ {sw}], Y: [0 ~ 80]")
-    print("=" * 68 + "\n")
+    print(f"  * 屏幕物理分辨率: {sw} x {sh}", flush=True)
+    print(f"  * 当前鼠标坐标:   ({mx}, {my})", flush=True)
+    print(f"  * 右上角触发区域: X: [{sw - 120} ~ {sw}], Y: [0 ~ 80]", flush=True)
+    print("=" * 68 + "\n", flush=True)
 
     # 1. 基础全屏 / ROI 截图验证
-    print(">> [步骤 1/2] 正在测试原生显存截图能力...")
+    print(">> [步骤 1/2] 正在测试原生显存截图能力...", flush=True)
     test_roi = {"x": 0, "y": 0, "width": sw, "height": sh}
     t0 = time.perf_counter()
     img = grab_roi(test_roi)
@@ -59,16 +59,20 @@ def main():
     save_path = os.path.join(BASE_DIR, "temp_test_screenshot.png")
     img.save(save_path)
 
-    print(f"   - 截屏耗时:   {cost_ms:.2f} ms")
-    print(f"   - 图片尺寸:   {img.size[0]} x {img.size[1]} ({img.mode})")
-    print(f"   - 像素均值:   {arr.mean():.2f} (有效色彩内容，无黑屏)")
-    print(f"   - 图片已保存: {save_path}")
-    print("   -> [通过] 原生 GDI 显存截图工作正常！\n")
+    print(f"   - 截屏耗时:   {cost_ms:.2f} ms", flush=True)
+    print(f"   - 图片尺寸:   {img.size[0]} x {img.size[1]} ({img.mode})", flush=True)
+    print(f"   - 像素均值:   {arr.mean():.2f} (有效色彩内容，无黑屏)", flush=True)
+    print(f"   - 图片已保存: {save_path}", flush=True)
+    print("   -> [通过] 原生 GDI 显存截图工作正常！\n", flush=True)
+
+    if "--check-only" in sys.argv:
+        print(">> 已指定 --check-only 参数，测试顺利完成！", flush=True)
+        return
 
     # 2. 交互式鼠标右上角停留 0.3s 截题验证
-    print(">> [步骤 2/2] 正在启动右上角鼠标停留 (0.3s) 感知引擎...")
-    print("   ★ 请现在将鼠标光标甩到【屏幕右上角】并停顿 0.3 秒以测试触发！")
-    print("   (按 Ctrl+C 可跳过此步骤)\n")
+    print(">> [步骤 2/2] 正在启动右上角鼠标停留 (0.3s) 感知引擎...", flush=True)
+    print("   ★ 请现在将鼠标光标甩到【屏幕右上角】并停顿 0.3 秒以测试触发！", flush=True)
+    print("   (按 Ctrl+C 可跳过此步骤)\n", flush=True)
 
     trigger_results = []
 
@@ -76,11 +80,11 @@ def main():
         trigger_results.append(captured_img)
         save_trigger_path = os.path.join(BASE_DIR, "temp_test_mouse_trigger.png")
         captured_img.save(save_trigger_path)
-        print("\n" + "#" * 60)
-        print(f"   ★ 【触发成功！】检测到鼠标在屏幕右上角停留达到 0.3 秒！")
-        print(f"   ★ 题目已捕获完成！尺寸: {captured_img.size}")
-        print(f"   ★ 截图已保存至: {save_trigger_path}")
-        print("#" * 60 + "\n")
+        print("\n\n" + "#" * 60, flush=True)
+        print(f"   ★ 【触发成功！】检测到鼠标在屏幕右上角停留达到 0.3 秒！", flush=True)
+        print(f"   ★ 题目已捕获完成！尺寸: {captured_img.size}", flush=True)
+        print(f"   ★ 截图已保存至: {save_trigger_path}", flush=True)
+        print("#" * 60 + "\n", flush=True)
         try:
             import winsound
             winsound.MessageBeep()
@@ -101,27 +105,40 @@ def main():
     monitor.start()
 
     try:
-        # 循环提示，等待用户将鼠标移入右上角测试
         start_wait = time.time()
+        last_print = 0.0
         while len(trigger_results) == 0:
-            time.sleep(0.1)
+            time.sleep(0.05)
+            now = time.time()
             cx, cy = _get_cursor_pos()
-            # 每隔 1 秒打印一次光标状态
-            elapsed = time.time() - start_wait
+            in_corner = (cx >= sw - 120) and (0 <= cy <= 80)
+            
+            if now - last_print >= 0.2:
+                last_print = now
+                if in_corner:
+                    status = "【已进入右上角！保持停顿 0.3s...】"
+                else:
+                    dx = max(0, (sw - 120) - cx)
+                    dy = max(0, cy - 80)
+                    status = f"距离右上角差 X: {dx}px, Y: {dy}px"
+                sys.stdout.write(f"\r   [光标跟踪] 坐标: ({cx:4d}, {cy:4d}) | {status}   ")
+                sys.stdout.flush()
+
+            elapsed = now - start_wait
             if elapsed >= 30:
-                print("   [提示] 30 秒内未检测到移入右上角，退出交互等待。")
+                print("\n   [提示] 30 秒内未检测到移入右上角，退出交互等待。", flush=True)
                 break
     except KeyboardInterrupt:
-        print("\n   [跳过] 用户中断交互测试。")
+        print("\n   [跳过] 用户中断交互测试。", flush=True)
     finally:
         monitor.stop()
 
-    print("\n" + "=" * 68)
+    print("\n" + "=" * 68, flush=True)
     if trigger_results:
-        print("   【验证完毕】截屏功能与右上角鼠标停留触发均 100% 正常生效！")
+        print("   【验证完毕】截屏功能与右上角鼠标停留触发均 100% 正常生效！", flush=True)
     else:
-        print("   【验证完毕】截屏底层已验证成功，可在主程序运行时直接使用右上角停留触发！")
-    print("=" * 68 + "\n")
+        print("   【验证完毕】截屏底层已验证成功，可在主程序运行时直接使用右上角停留触发！", flush=True)
+    print("=" * 68 + "\n", flush=True)
 
 
 if __name__ == "__main__":
