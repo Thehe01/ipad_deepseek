@@ -1,12 +1,12 @@
 """
-【主机看板本地测试工具】
-无需启动辅助电脑，直接在当前主机上测试 iPhone 看板效果与写字板/记事本剪切板粘贴功能！
+【iPhone 手机常亮看板 · 本地扫码测试工具】
+无需启动辅助电脑，直接在当前主机上生成看板二维码与模拟各题型推送！
 
 功能：
-1. 本地启动 iPhone 看板 HTTP 服务（默认端口 8080），打印扫码二维码与局域网网址。
-2. 模拟代码题时【自动直接写入系统剪切板】，切换到写字板按 Ctrl+V 立即验证！
-3. 全局热键实时监听：【双击 Ctrl】、【Ctrl+Q】、【F9】均可随时一键将代码重写入剪切板。
-4. 按 'n' 一键唤起 Windows 记事本/写字板；按 'c' 手动重写剪切板；按 'o' 浏览器查看看板。
+1. 本地启动 iPhone 看板 HTTP 服务（默认端口 8080），在终端直接呈现清晰扫码二维码与局域网网址。
+2. 手机 Safari 扫码即开、常亮不息屏显示题目。
+3. 模拟各题型推送（单选、连排题、Java算法、Python算法、简答题等）。
+4. 电脑端不弹出浏览器与写字板，纯净静默运行，支持全局热键静默存入剪切板。
 """
 
 import os
@@ -274,12 +274,12 @@ def main():
     global _latest_content, _hotkey_running
 
     print("=" * 68)
-    print("      【主机看板 & 写字板/剪切板 一键本地全真测试环境】")
+    print("        【 📱 iPhone 手机常亮看板 · 本地扫码测试工具 】")
     print("=" * 68)
-    print("  * 无需启动第二台电脑，完全在本机运行与调试！")
-    print("  * 默认不修改剪切板（保持自由使用），按下快捷键后才写入剪切板！")
-    print("  * 支持所有题型（单选 / 多选 / 简答 / 代码，不管什么题均可拷贝）！")
-    print("  * 随时按【双击 Ctrl】、【Ctrl+Q】或【F9】立即拷贝当前题目内容！")
+    print("  * 无需启动第二台电脑，直接在本机测试手机端常亮看板显示！")
+    print("  * 用 iPhone 相机 / 微信直接扫描下方终端二维码，即可打开看板。")
+    print("  * 电脑端纯净运行，不弹出写字板与浏览器，不占用桌面空间。")
+    print("  * 支持全局热键：【双击 Ctrl】/【Ctrl+Q】/【F9】静默存入剪切板。")
     print("=" * 68 + "\n")
 
     # 1. 检查或启动剪切板接收器 (端口 8081)
@@ -303,17 +303,9 @@ def main():
             clip_server.stop()
         return
 
-    local_url = "http://localhost:8080"
-
     # 启动快捷键监听后台线程
     t_hotkey = threading.Thread(target=_hotkey_listener_loop, daemon=True)
     t_hotkey.start()
-
-    # 自动在默认浏览器中打开看板
-    try:
-        webbrowser.open(local_url)
-    except Exception:
-        pass
 
     print("\n" + "-" * 68)
     print("【操作指令菜单】")
@@ -326,40 +318,27 @@ def main():
     print("  [7] 模拟【解题中等待状态】(黄色动态呼吸指示灯)")
     print("  [8] 手动输入自定义文本发送")
     print("  [9] 模拟【LeetCode 138】(链表深拷贝实测题，带完整换行代码)")
-    print("  [c] 快捷键模拟：手动将本题内容拷贝进剪切板")
-    print("  [n] 一键打开 Windows 记事本 / 写字板 (进行 Ctrl+V 粘贴测试)")
-    print("  [o] 在当前电脑浏览器中重新打开看板页面")
+    print("  [r] 重新显示手机扫码二维码与网址")
+    print("  [c] 快捷键模拟：手动将本题内容静默写入系统剪切板")
     print("  [q] 退出测试")
     print("-" * 68 + "\n")
 
     try:
         while True:
-            cmd = input("请输入测试指令 (1-9 / c / n / o / q): ").strip().lower()
+            cmd = input("请输入测试指令 (1-9 / r / c / q): ").strip().lower()
 
             if cmd == "q":
                 break
 
-            elif cmd == "n":
-                print("\n[记事本] 正在打开 Windows 记事本 / 写字板...")
-                try:
-                    os.system("start notepad.exe")
-                except Exception:
-                    os.system("start write.exe")
-                if _latest_content:
-                    print(">> 记事本已打开！请按快捷键【双击 Ctrl】或【Ctrl+Q】提取内容，再按【Ctrl + V】粘贴！\n")
-                else:
-                    print(">> 记事本已打开！当前尚未模拟题目，请先在菜单中输入 1-9 模拟题目！\n")
+            elif cmd == "r":
+                dash_server.print_qr_and_link()
 
             elif cmd == "c":
                 if _latest_content:
                     _write_clipboard(_latest_content)
-                    print(f"\n>> [剪切板] ✅ 已将当前题目内容拷贝进 Windows 剪切板（{len(_latest_content)} 字符）！直接 Ctrl+V 粘贴即可！\n")
+                    print(f"\n>> [剪切板] ✅ 已将当前题目内容拷贝进 Windows 剪切板（{len(_latest_content)} 字符）！\n")
                 else:
                     print("\n>> [提示] 当前尚未生成题目，请先输入 1-9 模拟题目！\n")
-
-            elif cmd == "o":
-                print(f"[打开浏览器] 正在打开 {local_url} ...")
-                webbrowser.open(local_url)
 
             elif cmd in PRESET_ANSWERS:
                 title, content = PRESET_ANSWERS[cmd]
@@ -381,9 +360,9 @@ def main():
                 except Exception:
                     pass
 
-                print(">> 看板已更新！可在手机或电脑浏览器中实时查看效果。")
+                print(">> 看板已更新！可在手机常亮看板中实时查看效果。")
                 print(">> [剪切板状态] ⚪ 默认未修改系统剪切板（保持自由使用）。")
-                print(">> [提取说明]   👉 按【双击 Ctrl】、【Ctrl+Q】或【F9】立即拷贝进剪切板，去写字板 Ctrl+V 即可粘贴！\n")
+                print(">> [提取说明]   👉 如需拷贝到电脑剪切板，按【双击 Ctrl】、【Ctrl+Q】或【F9】立即存入！\n")
 
             elif cmd == "7":
                 print("\n>> 正在模拟：解题中状态...")
@@ -411,7 +390,7 @@ def main():
                     print(">> [提示] 内容为空，未发送。\n")
 
             else:
-                print("未知指令，请输入 1-9, c, n, o 或 q。")
+                print("未知指令，请输入 1-9, r, c 或 q。")
 
     except KeyboardInterrupt:
         print("\n[退出] 用户中断...")
