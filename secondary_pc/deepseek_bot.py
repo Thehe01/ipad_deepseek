@@ -296,8 +296,15 @@ class DeepSeekBot:
         """执行上传图片与发送 Prompt 的具体动作，包含发送前清理、发送按钮点击与闭环验证"""
         print(f"\n[DeepSeek] 准备投递题目截图: {os.path.basename(image_path)} ...")
 
-        # 1. 发送前预清理：清空输入框遗留的历史附件，杜绝多图堆积
+        # 1. 发送前预清理：若上一题仍在生成先点击停止，并清空输入框遗留的历史附件，杜绝多图堆积
         page.evaluate("""() => {
+            const stopBtn = Array.from(document.querySelectorAll('button, div[role="button"]')).find(b => {
+                const t = (b.innerText || '') + (b.getAttribute('aria-label') || '');
+                return t.includes('停止') || t.includes('Stop');
+            });
+            if (stopBtn) {
+                try { stopBtn.click(); } catch(e) {}
+            }
             const deleteBtns = document.querySelectorAll('.ds-file-preview button, [class*="file-item"] button, [class*="upload-item"] button, [class*="close"], [aria-label*="删除"]');
             deleteBtns.forEach(btn => {
                 try { btn.click(); } catch(e) {}
@@ -420,6 +427,7 @@ class DeepSeekBot:
         start_wait = time.time()
         max_wait_time = 120
         last_answer = ""
+        generation_completed = False
         
         time.sleep(2.0)
 
@@ -535,6 +543,7 @@ class DeepSeekBot:
                     final_text = page.evaluate(extract_markdown_js)
                     if final_text:
                         last_answer = final_text
+                    generation_completed = True
                     break
 
             except Exception:
@@ -550,11 +559,34 @@ class DeepSeekBot:
             except Exception:
                 pass
 
-        if not last_answer:
-            print(f"\n[错误] 本题等待 DeepSeek 生成答案超时 ({max_wait_time} 秒未获取到有效回答)！")
-            if self.on_status_callback:
-                self.on_status_callback(f"⚠️ 解题响应超时 ({max_wait_time}s)，保留题目并准备重试...")
-            raise TimeoutError(f"等待 DeepSeek 解题响应超时 ({max_wait_time} 秒未获取到有效回答)")
+        # 答案生成完成性判定：
+        # 必须显式标记 generation_completed 为 True 且 last_answer 非空；
+        # 若达到 max_wait_time 超时退出且未生成完毕（即使已产生部分半截文本），也绝不能发布为完整答案，必须抛出 TimeoutError 并保留原图！
+        if not generation_completed or not last_answer:
+            # 如果超时仍处于生成状态，尝试点击停止按钮终止流式生成，避免后续污染
+            try:
+                page.evaluate("""() => {
+                    const stopBtn = Array.from(document.querySelectorAll('button, div[role="button"]')).find(b => {
+                        const t = (b.innerText || '') + (b.getAttribute('aria-label') || '');
+                        return t.includes('停止') || t.includes('Stop');
+                    });
+                    if (stopBtn) {
+                        try { stopBtn.click(); } catch(e) {}
+                    }
+                }""")
+            except Exception:
+                pass
+
+            if last_answer:
+                print(f"\n[错误] 本题等待 DeepSeek 生成答案超时 ({max_wait_time} 秒未生成完毕，仅获取到部分内容，判定失败并保留原图)！")
+                if self.on_status_callback:
+                    self.on_status_callback(f"⚠️ 解题超时未完成 (仅输出部分内容)，保留题目并准备重试...")
+                raise TimeoutError(f"等待 DeepSeek 解题响应超时 ({max_wait_time} 秒未生成完毕，仅获取到部分回答)")
+            else:
+                print(f"\n[错误] 本题等待 DeepSeek 生成答案超时 ({max_wait_time} 秒未获取到有效回答)！")
+                if self.on_status_callback:
+                    self.on_status_callback(f"⚠️ 解题响应超时 ({max_wait_time}s)，保留题目并准备重试...")
+                raise TimeoutError(f"等待 DeepSeek 解题响应超时 ({max_wait_time} 秒未获取到有效回答)")
 
         print("\n" + "=" * 60)
         print(f"[DeepSeek 答案已生成并同步] >>>\n{last_answer}")
