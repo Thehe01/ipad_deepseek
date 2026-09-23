@@ -20,61 +20,6 @@ try:
 except Exception:
     pass
 
-# ── 剪切板工具（纯 Win32 ctypes，无需额外依赖）──
-_u32 = ctypes.windll.user32
-_k32 = ctypes.windll.kernel32
-_k32.GlobalAlloc.restype = wintypes.HGLOBAL
-_k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-_k32.GlobalLock.restype = wintypes.LPVOID
-_k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-_k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-_u32.OpenClipboard.argtypes = [wintypes.HWND]
-_u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-
-
-def _copy_to_clipboard(text):
-    """将文本写入 Windows 剪切板（UTF-16LE），失败时静默忽略。"""
-    try:
-        if not _u32.OpenClipboard(None):
-            return
-        try:
-            _u32.EmptyClipboard()
-            data = text.encode("utf-16le") + b"\x00\x00"
-            h_mem = _k32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
-            p_mem = _k32.GlobalLock(h_mem)
-            ctypes.memmove(p_mem, data, len(data))
-            _k32.GlobalUnlock(h_mem)
-            _u32.SetClipboardData(13, h_mem)  # CF_UNICODETEXT = 13
-        finally:
-            _u32.CloseClipboard()
-    except Exception as e:
-        print(f"[剪切板] 写入失败（已忽略）: {e}")
-
-
-def _extract_code_blocks(text):
-    """从 Markdown 文本提取所有代码围栏内容（去掉语言标注行），合并为一段。"""
-    if not text:
-        return None
-    # 优先匹配标准的 ```lang\n...```
-    pattern = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
-    blocks = pattern.findall(text)
-    if not blocks:
-        # 兼容无显式换行的代码围栏
-        loose_pattern = re.compile(r"```(?:[a-zA-Z0-9+#-]*\s+)?(.*?)```", re.DOTALL)
-        blocks = loose_pattern.findall(text)
-    if not blocks:
-        # 如果模型直接返回了裸代码（包含 class Solution / def 等但没加反引号）
-        if "class Solution" in text or re.search(r"^(?:class|public|def|#include)\b", text, re.MULTILINE):
-            blocks = [text]
-    if not blocks:
-        return None
-    cleaned_blocks = []
-    for b in blocks:
-        # 彻底清洗代码开头可能出现的语言标签或复制下载残留
-        cleaned = re.sub(r"^(?:[a-zA-Z0-9+#-]+\s*)?(?:复制|下载|Copy|Download)+\s*", "", b.strip(), flags=re.IGNORECASE)
-        cleaned_blocks.append(cleaned)
-    return "\n\n".join(cleaned_blocks)
-
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -458,11 +403,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 class SecondaryServer:
     """辅助电脑服务端：托管 iPhone 看板、接收主电脑图片上传、发送局域网 UDP 发现广播"""
     def __init__(self, port=HTTP_PORT, discovery_port=DISCOVERY_PORT,
-                 on_question_received=None, clipboard_server_port=8081):
+                 on_question_received=None):
         self.port = port
         self.discovery_port = discovery_port
         self.on_question_received = on_question_received
-        self.clipboard_server_port = clipboard_server_port
         self.server = None
         self._http_thread = None
         self._udp_thread = None
@@ -482,31 +426,7 @@ class SecondaryServer:
         with self._lock:
             self.state["status"] = status_text
 
-    def _push_code_to_master(self, master_ip, code_text):
-        """将代码答案 POST 到主电脑剪切板接收接口（后台线程调用）。"""
-        url = f"http://{master_ip}:{self.clipboard_server_port}/api/clipboard"
-        try:
-            import urllib.request
-            data = code_text.encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=data,
-                method="POST",
-                headers={"Content-Type": "text/plain; charset=utf-8",
-                         "Content-Length": str(len(data))}
-            )
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                status = resp.getcode()
-            if status == 200:
-                print(f"[剪切板] ✅ 代码已推送至主电脑剪切板 ({master_ip})，"
-                      f"共 {len(code_text)} 字符，主电脑直接 Ctrl+V 粘贴即可！")
-            else:
-                print(f"[剪切板] ⚠️ 主电脑剪切板接口返回 {status}")
-        except Exception as e:
-            print(f"[剪切板] ⚠️ 推送失败（主电脑可能未启动剪切板服务）: {e}")
-
     def post_answer(self, answer_text):
-
         with self._lock:
             now_str = time.strftime("%H:%M:%S")
             self.state["answer_id"] += 1
@@ -518,19 +438,6 @@ class SecondaryServer:
                 "answer": answer_text[:60] + ("..." if len(answer_text) > 60 else ""),
                 "time": now_str
             })
-            master_ip = self._master_ip
-
-        # 不管什么题（选择题/连排题/简答题/代码题），均把答案内容反向推送给主电脑暂存（主电脑默认不修改剪切板，按快捷键后才写入）
-        clip_content = _extract_code_blocks(answer_text)
-        if not clip_content or not clip_content.strip():
-            clip_content = answer_text.strip()
-
-        if clip_content and master_ip:
-            threading.Thread(
-                target=self._push_code_to_master,
-                args=(master_ip, clip_content),
-                daemon=True
-            ).start()
 
     def get_lan_ip(self):
         try:

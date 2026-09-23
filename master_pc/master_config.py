@@ -50,11 +50,6 @@ MAX_STABILIZE_TIMEOUT = 4.0
 # 自动截题触发后的冷却时间（秒）
 AUTO_COOLDOWN = 2.0
 
-# 全局快捷键设置
-HOTKEY_TRIGGER = "ctrl+shift"
-
 # 辅助电脑 UDP 自动发现端口
 DISCOVERY_PORT = 8888
 
-# 主电脑剪切板接收服务端口
-CLIPBOARD_SERVER_PORT = 8081

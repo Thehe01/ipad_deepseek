@@ -12,11 +12,6 @@
 import os
 import sys
 import time
-import ctypes
-from ctypes import wintypes
-import webbrowser
-import threading
-import urllib.request
 
 # 引入项目模块
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +24,7 @@ try:
 except Exception:
     pass
 
-from secondary_server import SecondaryServer, _extract_code_blocks
+from secondary_server import SecondaryServer
 
 # 预设测试数据
 PRESET_ANSWERS = {
@@ -42,7 +37,7 @@ PRESET_ANSWERS = {
         "【第1题】 A\n【第2题】 D\n【第3题】 B\n【第4题】 C\n【第5题】 True"
     ),
     "3": (
-        "Java 编程题（题号置顶 + 完整换行缩进 + 自动写入剪切板）",
+        "Java 编程题（题号置顶 + 完整换行缩进呈现）",
         "【第2题】完整 Java 源代码如下：\n"
         "```java\n"
         "import java.util.*;\n\n"
@@ -60,7 +55,7 @@ PRESET_ANSWERS = {
         "```"
     ),
     "4": (
-        "Python 算法题（题号置顶 + 语法高亮 + 自动写入剪切板）",
+        "Python 算法题（题号置顶 + 语法高亮呈现）",
         "【第3题】完整 Python 源代码如下：\n"
         "```python\n"
         "def two_sum(nums: list[int], target: int) -> list[int]:\n"
@@ -138,16 +133,6 @@ PRESET_ANSWERS = {
         "```"
     ),
 }
-
-
-def _get_clipboard_content(text):
-    """根据题目内容提取剪切板文本：代码题提取纯净可编译运行的代码；其他题型提取完整答案。"""
-    if not text:
-        return ""
-    code = _extract_code_blocks(text)
-    if code and code.strip():
-        return code.strip()
-    return text.strip()
 
 
 def main():
