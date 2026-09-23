@@ -5,6 +5,11 @@ import threading
 import numpy as np
 from PIL import ImageGrab, Image
 
+import json
+import ctypes
+
+from ctypes import wintypes
+
 try:
     from master_config import (
         DIFF_THRESHOLD,
@@ -13,14 +18,41 @@ try:
         MAX_STABILIZE_TIMEOUT,
         AUTO_COOLDOWN,
         UPLOAD_INITIAL_QUESTION,
+        MOUSE_TRIGGER_ENABLED,
+        MOUSE_CORNER_WIDTH,
+        MOUSE_CORNER_HEIGHT,
+        MOUSE_HOVER_TIME,
+        MOUSE_TRIGGER_COOLDOWN,
+        MOUSE_TRIGGER_CONFIG_FILE,
     )
 except ImportError:
-    DIFF_THRESHOLD = 0.06
+    DIFF_THRESHOLD = 0.025
     STABILIZE_DELAY = 0.8
     POLL_INTERVAL = 0.25
     MAX_STABILIZE_TIMEOUT = 4.0
     AUTO_COOLDOWN = 2.0
     UPLOAD_INITIAL_QUESTION = True
+    MOUSE_TRIGGER_ENABLED = True
+    MOUSE_CORNER_WIDTH = 120
+    MOUSE_CORNER_HEIGHT = 80
+    MOUSE_HOVER_TIME = 0.3
+    MOUSE_TRIGGER_COOLDOWN = 2.0
+    MOUSE_TRIGGER_CONFIG_FILE = "master_mouse_trigger_config.json"
+
+try:
+    ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
+
+_user32 = ctypes.windll.user32
+
+def _get_cursor_pos():
+    pt = wintypes.POINT()
+    _user32.GetCursorPos(ctypes.byref(pt))
+    return int(pt.x), int(pt.y)
+
+def _get_screen_size():
+    return int(_user32.GetSystemMetrics(0)), int(_user32.GetSystemMetrics(1))
 
 
 class ScreenMonitor:
@@ -44,6 +76,11 @@ class ScreenMonitor:
         max_stabilize_timeout=None,
         cooldown=None,
         upload_initial=None,
+        mouse_trigger_enabled=None,
+        mouse_corner_w=None,
+        mouse_corner_h=None,
+        mouse_hover_time=None,
+        mouse_trigger_cooldown=None,
     ):
         self.roi = roi
         self.bbox = (
@@ -68,6 +105,32 @@ class ScreenMonitor:
             upload_initial if upload_initial is not None else UPLOAD_INITIAL_QUESTION
         )
 
+        # 鼠标热区（屏幕右上角 / 自定义热区）触发配置
+        self.mouse_trigger_enabled = (
+            mouse_trigger_enabled if mouse_trigger_enabled is not None else MOUSE_TRIGGER_ENABLED
+        )
+        self.mouse_corner_w = (
+            mouse_corner_w if mouse_corner_w is not None else MOUSE_CORNER_WIDTH
+        )
+        self.mouse_corner_h = (
+            mouse_corner_h if mouse_corner_h is not None else MOUSE_CORNER_HEIGHT
+        )
+        self.mouse_hover_time = (
+            mouse_hover_time if mouse_hover_time is not None else MOUSE_HOVER_TIME
+        )
+        self.mouse_trigger_cooldown = (
+            mouse_trigger_cooldown if mouse_trigger_cooldown is not None else MOUSE_TRIGGER_COOLDOWN
+        )
+        self.mouse_trigger_roi = None
+        self._last_mouse_config_mtime = 0.0
+        self._hover_start_time = 0.0
+        self._last_mouse_trigger_time = 0.0
+        self._corner_already_triggered = False
+        self._mouse_thread = None
+
+        # 启动时初次载入鼠标触发区
+        self._reload_mouse_trigger_roi()
+
         self.is_running = False
         self.is_paused = False
         self._thread = None
@@ -79,6 +142,33 @@ class ScreenMonitor:
         self.first_trigger_time = 0
         self.last_snap_time = 0.0
         self._initial_uploaded = False
+
+    def _reload_mouse_trigger_roi(self):
+        """检查并热重载鼠标触发区配置"""
+        if not self.mouse_trigger_enabled or not os.path.exists(MOUSE_TRIGGER_CONFIG_FILE):
+            return
+        try:
+            mtime = os.path.getmtime(MOUSE_TRIGGER_CONFIG_FILE)
+            if mtime != self._last_mouse_config_mtime:
+                self._last_mouse_config_mtime = mtime
+                with open(MOUSE_TRIGGER_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if all(k in data for k in ("x", "y", "width", "height")):
+                        old_roi = self.mouse_trigger_roi
+                        self.mouse_trigger_roi = {
+                            "x": int(data["x"]),
+                            "y": int(data["y"]),
+                            "width": int(data["width"]),
+                            "height": int(data["height"])
+                        }
+                        if old_roi != self.mouse_trigger_roi:
+                            self._log(
+                                f"[鼠标触发区] 热加载就绪: x={self.mouse_trigger_roi['x']}, "
+                                f"y={self.mouse_trigger_roi['y']}, w={self.mouse_trigger_roi['width']}, "
+                                f"h={self.mouse_trigger_roi['height']}，鼠标移入或点击将自动延时截题！"
+                            )
+        except Exception:
+            pass
 
     def _log(self, msg):
         try:
@@ -156,16 +246,96 @@ class ScreenMonitor:
         self.is_running = True
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
+
+        if self.mouse_trigger_enabled:
+            self._mouse_thread = threading.Thread(target=self._mouse_trigger_loop, daemon=True)
+            self._mouse_thread.start()
+
         self._log(
             f"[全自动切题引擎] 已启动！监控区域: {self.bbox}, "
             f"变动阈值: {self.diff_threshold*100:.1f}%, 防抖稳定: {self.stabilize_delay}s, "
             f"采样间隔: {self.poll_interval}s, 冷却时间: {self.cooldown}s"
         )
+        if self.mouse_trigger_enabled:
+            self._log(
+                f"[鼠标触发就绪] 鼠标在屏幕右上角（宽度: {self.mouse_corner_w}px, 高度: {self.mouse_corner_h}px）"
+                f"停留达到 {self.mouse_hover_time:.1f}s 即可自动截屏！"
+            )
 
     def stop(self):
         self.is_running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.5)
+            self._thread.join(timeout=1.0)
+        if hasattr(self, "_mouse_thread") and self._mouse_thread and self._mouse_thread.is_alive():
+            self._mouse_thread.join(timeout=1.0)
+
+    def _mouse_trigger_loop(self):
+        """轻量级高频鼠标热区感知线程（约 30Hz，CPU < 0.05%）"""
+        last_cfg_check = 0.0
+        while self.is_running:
+            try:
+                time.sleep(0.03)
+
+                if self.is_paused or not self.mouse_trigger_enabled:
+                    continue
+
+                now = time.time()
+                # 每隔 1 秒检查一次鼠标热区自定义配置文件是否有更新（支持热加载）
+                if now - last_cfg_check >= 1.0:
+                    last_cfg_check = now
+                    self._reload_mouse_trigger_roi()
+
+                mx, my = _get_cursor_pos()
+                sw, sh = _get_screen_size()
+
+                # 1. 判定是否处于触发区：
+                # A. 屏幕右上角区域（默认宽度 120px、高度 80px，面积适中）
+                in_top_right = (mx >= sw - self.mouse_corner_w) and (0 <= my <= self.mouse_corner_h)
+
+                # B. 自定义框选的区域（若配置了）
+                in_custom = False
+                if self.mouse_trigger_roi:
+                    rx = self.mouse_trigger_roi["x"]
+                    ry = self.mouse_trigger_roi["y"]
+                    rw = self.mouse_trigger_roi["width"]
+                    rh = self.mouse_trigger_roi["height"]
+                    in_custom = (rx <= mx <= rx + rw and ry <= my <= ry + rh)
+
+                in_zone = in_top_right or in_custom
+
+                if in_zone:
+                    if self._hover_start_time == 0.0:
+                        self._hover_start_time = now
+                    hover_dur = now - self._hover_start_time
+
+                    if hover_dur >= self.mouse_hover_time and not self._corner_already_triggered:
+                        cooldown_ok = (now - self._last_mouse_trigger_time >= self.mouse_trigger_cooldown) and (now - self.last_snap_time >= 1.0)
+                        if cooldown_ok:
+                            location_desc = "屏幕右上角" if in_top_right else "自定义触发区"
+                            self._log(
+                                f"[鼠标停留触发] 检测到鼠标在{location_desc}停留达到 {self.mouse_hover_time:.1f}s "
+                                f"(坐标: {mx}, {my})，立即截屏送题！"
+                            )
+                            self._last_mouse_trigger_time = now
+                            self._corner_already_triggered = True  # 标记当前停留已触发，离开前不再重复触发
+
+                            try:
+                                raw = self._grab_raw()
+                                self.sync_ref_frame(raw)
+                                self.last_snap_time = time.time()
+                                self.state = "IDLE"
+                                self._log(f"[鼠标截题成功] 题目画面捕获完成，已送入上传队列！")
+                                if self.on_question_detected:
+                                    self.on_question_detected(raw, is_manual=False, trigger_name=f"鼠标停留{location_desc}")
+                            except Exception as e:
+                                self._log(f"[鼠标截题异常] 抓取题目画面失败: {e}")
+                else:
+                    # 鼠标移出触发区，重置计时器与触发标记，重新就绪！
+                    self._hover_start_time = 0.0
+                    self._corner_already_triggered = False
+
+            except Exception:
+                time.sleep(0.1)
 
     def _monitor_loop(self):
         last_fail_log = 0.0

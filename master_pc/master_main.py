@@ -28,6 +28,11 @@ from discovery import discover_secondary_pc
 from roi_selector import get_roi_interactive
 from screen_monitor import ScreenMonitor
 
+try:
+    ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
+
 # ── 主电脑剪切板工具（Win32 ctypes 64位完全兼容）──
 _u32 = ctypes.windll.user32
 _k32 = ctypes.windll.kernel32
@@ -680,7 +685,7 @@ def main():
     except Exception:
         pass
 
-    _log("[监听就绪] 全自动感知切题已待命！手动截题 [鼠标滚轮中键] / [鼠标侧键] / [Ctrl+Shift] / [F8]、内容提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已激活！")
+    _log("[监听就绪] 鼠标在屏幕右上角停留0.3s即截屏 / 画面感知切题已待命！手动截题 [鼠标滚轮中键] / [鼠标侧键] / [Ctrl+Shift] / [F8]、内容提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已激活！")
 
     # 2. 框选或复用题目区域并立即启动全自动切题监控
     try:

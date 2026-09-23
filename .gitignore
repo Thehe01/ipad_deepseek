@@ -45,6 +45,9 @@ chrome_debug.log
 
 # Temporary screenshots & scratch scripts
 temp_capture.png
+temp_received_question.png
+pending_uploads/
+received_questions/
 *.tmp
 scratch/
 
