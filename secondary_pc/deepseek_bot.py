@@ -552,13 +552,6 @@ class DeepSeekBot:
             time.sleep(0.8)
 
 
-        if ENABLE_R1:
-            try:
-                time.sleep(0.5)
-                self._ensure_r1_enabled(page)
-            except Exception:
-                pass
-
         # 答案生成完成性判定：
         # 必须显式标记 generation_completed 为 True 且 last_answer 非空；
         # 若达到 max_wait_time 超时退出且未生成完毕（即使已产生部分半截文本），也绝不能发布为完整答案，必须抛出 TimeoutError 并保留原图！
@@ -588,8 +581,17 @@ class DeepSeekBot:
                     self.on_status_callback(f"⚠️ 解题响应超时 ({max_wait_time}s)，保留题目并准备重试...")
                 raise TimeoutError(f"等待 DeepSeek 解题响应超时 ({max_wait_time} 秒未获取到有效回答)")
 
+        # 1. 第一时间以最高优先级发布答案，零延迟呈现给用户/手机看板
         print("\n" + "=" * 60)
         print(f"[DeepSeek 答案已生成并同步] >>>\n{last_answer}")
         print("=" * 60 + "\n")
         if self.on_answer_callback:
             self.on_answer_callback(last_answer)
+
+        # 2. 答案发布完成后，在后台为下一题检查并确保「深度思考 (R1)」开关已激活
+        if ENABLE_R1:
+            try:
+                time.sleep(0.5)
+                self._ensure_r1_enabled(page)
+            except Exception:
+                pass
