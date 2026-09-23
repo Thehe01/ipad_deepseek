@@ -397,7 +397,6 @@ def _win32_hotkey_polling_loop():
     VK_ALT = 0x12
     VK_F8 = 0x77
     VK_F9 = 0x78
-    VK_F10 = 0x79
     VK_Q = 0x51
     VK_MBUTTON = 0x04   # 鼠标滚轮中键
     VK_XBUTTON1 = 0x05  # 鼠标侧键 1
@@ -410,7 +409,6 @@ def _win32_hotkey_polling_loop():
     last_snap_time = 0.0
     ctrl_down_prev = False
     f9_prev = False
-    f10_prev = False
     ctrl_q_prev = False
     last_ctrl_press_time = 0.0
 
@@ -423,7 +421,6 @@ def _win32_hotkey_polling_loop():
             alt = bool(u32.GetAsyncKeyState(VK_ALT) & 0x8000)
             f8 = bool(u32.GetAsyncKeyState(VK_F8) & 0x8000)
             f9 = bool(u32.GetAsyncKeyState(VK_F9) & 0x8000)
-            f10 = bool(u32.GetAsyncKeyState(VK_F10) & 0x8000)
             q = bool(u32.GetAsyncKeyState(VK_Q) & 0x8000)
             mbutton = bool(u32.GetAsyncKeyState(VK_MBUTTON) & 0x8000)
             xbutton = bool((u32.GetAsyncKeyState(VK_XBUTTON1) & 0x8000) or
@@ -460,12 +457,6 @@ def _win32_hotkey_polling_loop():
             if f9 and not f9_prev:
                 fetch_content_to_clipboard(trigger_name="按键 F9")
             f9_prev = f9
-
-            # ── 3.5 暂停/恢复自动切题监控：F10 ──
-            if f10 and not f10_prev:
-                if _screen_monitor:
-                    _screen_monitor.toggle_pause()
-            f10_prev = f10
 
             # ── 4. 双击 Ctrl 独立检测（宽松时间 0.03s ~ 0.85s，无 Shift/Alt 干扰）──
             if ctrl and not ctrl_down_prev:
@@ -513,7 +504,6 @@ def main():
     print(f"  [鼠标滚轮中键]        点击滚轮中键手动立即截题保底（手不离鼠标）")
     print(f"  [鼠标侧键]            点击侧键亦可截题（前进/后退键）")
     print(f"  [Ctrl+Shift] 或 [F8]  键盘截题备选通道")
-    print(f"  [F10]                暂停/恢复全自动切题监控")
     print(f"  [双击 Ctrl] / [Ctrl+Q] / [F9] 拷贝最新题目内容至剪切板（大题需要粘贴时使用）")
     print(f"  [Ctrl+C]             退出程序")
     print("=" * 65)
@@ -538,7 +528,6 @@ def main():
         keyboard.add_hotkey("f8", on_hotkey_trigger)
         keyboard.add_hotkey("ctrl+q", lambda: fetch_content_to_clipboard(trigger_name="快捷键 Ctrl+Q"))
         keyboard.add_hotkey("f9", lambda: fetch_content_to_clipboard(trigger_name="按键 F9"))
-        keyboard.add_hotkey("f10", lambda: _screen_monitor.toggle_pause() if _screen_monitor else None)
     except Exception:
         pass
 
@@ -582,7 +571,6 @@ def main():
     print(f"\n[监听就绪] 纯画面全自动切题已激活！")
     print(f"  * 只要屏幕/iPad发生换题翻页，画面稳定 0.8 秒后自动保存并上传 DeepSeek！")
     print(f"  * 手动截题保底：【鼠标滚轮中键】 / 【鼠标侧键】 / 【Ctrl+Shift】 / 【F8】随时可用。")
-    print(f"  * 【F10】快捷键随时暂停/恢复自动切题监控。")
     print(f"  * 大题/代码题按需按 [双击 Ctrl] / [Ctrl+Q] / [F9] 提取至剪切板。")
     print(f"  * 完全静音静默后台运行。")
 
