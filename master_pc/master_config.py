@@ -30,23 +30,25 @@ TEMP_IMAGE_PATH = os.path.join(BASE_DIR, "temp_capture.png")
 # 主机待发送截图专属持久化目录（逐任务落盘，杜绝重启或崩溃丢图）
 PENDING_UPLOAD_DIR = os.path.join(BASE_DIR, "pending_uploads")
 
-# 画面变动触发阈值（0.025 表示 2.5% 的灰度差异率，大幅提高对白底黑字文字细微变动的捕捉灵敏度）
+# 截题模式配置：唯一只保留「鼠标在右上角停留 0.3s 截屏」
+ENABLE_SCREEN_DIFF_TRIGGER = False  # 关闭画面像素帧差自动检测（彻底杜绝误报、动效干扰）
+ENABLE_HOTKEY_SCREENSHOT = False    # 关闭其他按键截屏（中键、侧键、F8等全部关闭）
+UPLOAD_INITIAL_QUESTION = False     # 启动时不自动上传，截题节奏 100% 由鼠标右上角停留触发掌控
+
+# 画面变动触发阈值（当 ENABLE_SCREEN_DIFF_TRIGGER 为 True 时生效）
 DIFF_THRESHOLD = 0.025
 
-# 翻页防抖稳定时间（秒，翻页或滑动后画面持续静止该时间即判定题目就绪）
+# 翻页防抖稳定时间（秒）
 STABILIZE_DELAY = 0.8
 
 # 画面采样间隔（秒）
 POLL_INTERVAL = 0.25
 
-# 防抖最长等待超时（秒，若画面有局部倒计时或微小动效导致持续微抖，超过此时长进行强制对比上传）
+# 防抖最长等待超时（秒）
 MAX_STABILIZE_TIMEOUT = 4.0
 
-# 自动截题触发后的冷却时间（秒，防止单题过渡动画导致连发）
+# 自动截题触发后的冷却时间（秒）
 AUTO_COOLDOWN = 2.0
-
-# 是否在启动并连通后自动将当前屏幕显示的第 1 题上传
-UPLOAD_INITIAL_QUESTION = True
 
 # 全局快捷键设置
 HOTKEY_TRIGGER = "ctrl+shift"

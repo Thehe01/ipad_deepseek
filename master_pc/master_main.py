@@ -23,6 +23,8 @@ from master_config import (
     TEMP_IMAGE_PATH,
     CLIPBOARD_SERVER_PORT,
     PENDING_UPLOAD_DIR,
+    ENABLE_HOTKEY_SCREENSHOT,
+    ENABLE_SCREEN_DIFF_TRIGGER,
 )
 from discovery import discover_secondary_pc
 from roi_selector import get_roi_interactive
@@ -577,26 +579,27 @@ def _win32_hotkey_polling_loop():
             xbutton = bool((u32.GetAsyncKeyState(VK_XBUTTON1) & 0x8000) or
                            (u32.GetAsyncKeyState(VK_XBUTTON2) & 0x8000))
 
-            # ── 1. 截题触发：鼠标滚轮中键 / 鼠标侧键 / Ctrl+Shift / F8 ──
-            snap_triggered = mbutton or xbutton or (ctrl and shift) or f8
-            if snap_triggered and not last_snap_pressed:
-                last_snap_pressed = True
-                now = time.time()
-                if now - last_snap_time >= 0.8:
-                    last_snap_time = now
-                    if mbutton:
-                        t_name = "鼠标滚轮中键"
-                    elif xbutton:
-                        t_name = "鼠标侧键"
-                    elif ctrl and shift:
-                        t_name = "Ctrl+Shift"
+            # ── 1. 截题触发：鼠标滚轮中键 / 鼠标侧键 / Ctrl+Shift / F8（若未开启则跳过）──
+            if ENABLE_HOTKEY_SCREENSHOT:
+                snap_triggered = mbutton or xbutton or (ctrl and shift) or f8
+                if snap_triggered and not last_snap_pressed:
+                    last_snap_pressed = True
+                    now = time.time()
+                    if now - last_snap_time >= 0.8:
+                        last_snap_time = now
+                        if mbutton:
+                            t_name = "鼠标滚轮中键"
+                        elif xbutton:
+                            t_name = "鼠标侧键"
+                        elif ctrl and shift:
+                            t_name = "Ctrl+Shift"
+                        else:
+                            t_name = "F8"
+                        on_hotkey_trigger(trigger_name=t_name)
                     else:
-                        t_name = "F8"
-                    on_hotkey_trigger(trigger_name=t_name)
-                else:
-                    _log("[提示] 截题过于频繁，已忽略重复触发。")
-            elif not snap_triggered:
-                last_snap_pressed = False
+                        _log("[提示] 截题过于频繁，已忽略重复触发。")
+                elif not snap_triggered:
+                    last_snap_pressed = False
 
             # ── 2. 快捷键提取内容：Ctrl + Q ──
             ctrl_q = ctrl and q
@@ -649,13 +652,14 @@ def main():
     args = parse_args()
 
     print("=" * 65)
-    print("      【主电脑端】全自动翻页截题 → 局域网秒级直传辅助电脑")
+    print("      【主电脑端】鼠标右上角停留截题 → 局域网秒级直传辅助电脑")
     print("=" * 65)
-    print(f"  [全自动感知切题]      默认开启！画面翻页稳定 0.8s 自动保存上传（完全零按键）")
-    print(f"  [鼠标滚轮中键]        点击滚轮中键手动立即截题保底（手不离鼠标）")
-    print(f"  [鼠标侧键]            点击侧键亦可截题（前进/后退键）")
-    print(f"  [Ctrl+Shift] 或 [F8]  键盘截题备选通道")
-    print(f"  [双击 Ctrl] / [Ctrl+Q] / [F9] 拷贝最新题目内容至剪切板（大题需要粘贴时使用）")
+    print(f"  [唯一截题通道]        鼠标移到屏幕右上角停留 0.3s 即自动截题（纯主动、零误触）")
+    if ENABLE_HOTKEY_SCREENSHOT:
+        print(f"  [按键截题通道]        已开启（鼠标滚轮中键 / 侧键 / Ctrl+Shift / F8）")
+    else:
+        print(f"  [其他截题方式]        已全部关闭（画面帧差自动检测与按键截题已彻底禁用）")
+    print(f"  [提取答案进剪切板]    【双击 Ctrl】 / 【Ctrl+Q】 / 【F9】（获取代码后 Ctrl+V 粘贴）")
     print(f"  [Ctrl+C]             退出程序")
     print("=" * 65)
 
@@ -678,20 +682,24 @@ def main():
     t_poll.start()
 
     try:
-        keyboard.add_hotkey("ctrl+shift", on_hotkey_trigger)
-        keyboard.add_hotkey("f8", on_hotkey_trigger)
+        if ENABLE_HOTKEY_SCREENSHOT:
+            keyboard.add_hotkey("ctrl+shift", on_hotkey_trigger)
+            keyboard.add_hotkey("f8", on_hotkey_trigger)
         keyboard.add_hotkey("ctrl+q", lambda: fetch_content_to_clipboard(trigger_name="快捷键 Ctrl+Q"))
         keyboard.add_hotkey("f9", lambda: fetch_content_to_clipboard(trigger_name="按键 F9"))
     except Exception:
         pass
 
-    _log("[监听就绪] 鼠标在屏幕右上角停留0.3s即截屏 / 画面感知切题已待命！手动截题 [鼠标滚轮中键] / [鼠标侧键] / [Ctrl+Shift] / [F8]、内容提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已激活！")
+    if ENABLE_HOTKEY_SCREENSHOT:
+        _log("[截题监听就绪] 鼠标右上角停留0.3s截屏 / 按键截题已激活；剪切板提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已就绪！")
+    else:
+        _log("[截题监听就绪] 唯一截题通道已锁定：鼠标在屏幕右上角停留0.3s即截题！剪切板提取 [双击 Ctrl] / [Ctrl+Q] / [F9] 已就绪！")
 
     # 2. 框选或复用题目区域并立即启动全自动切题监控
     try:
         _roi = get_roi_interactive(force_reselect=args.reselect)
         _log(f"[监控区域] 已锁定: x={_roi['x']}, y={_roi['y']}, w={_roi['width']}, h={_roi['height']}")
-        # 启动全自动切题监控引擎（纯画面感知）
+        # 启动全自动切题监控引擎
         _screen_monitor = ScreenMonitor(
             roi=_roi,
             on_question_detected=on_auto_question_detected,
@@ -722,16 +730,15 @@ def main():
     t_disc = threading.Thread(target=_discovery_worker, daemon=True)
     t_disc.start()
 
-    print(f"\n[监听就绪] 纯画面全自动切题已激活！")
-    print(f"  * 只要屏幕/iPad发生换题翻页，画面稳定 0.8 秒后自动保存并上传 DeepSeek！")
-    print(f"  * 手动截题保底：【鼠标滚轮中键】 / 【鼠标侧键】 / 【Ctrl+Shift】 / 【F8】随时可用。")
-    print(f"  * 大题/代码题按需按 [双击 Ctrl] / [Ctrl+Q] / [F9] 提取至剪切板。")
+    print(f"\n[截题就绪] 截题通道已待命！")
+    print(f"  * 唯一截题方式：鼠标光标移到屏幕右上角停留 0.3 秒，立即截题并送达 DeepSeek！")
+    print(f"  * 需要代码/答案时按 [双击 Ctrl] / [Ctrl+Q] / [F9] 写入剪切板（Ctrl+V 粘贴）。")
     print(f"  * 完全静音静默后台运行。")
 
     print("\n" + "#" * 65)
     print(f"【就绪】已连接至辅助电脑: {_secondary_url}")
-    print(f"  换题时自动感知上传；亦可随时按【鼠标滚轮中键】手动截题；")
-    print(f"  需要代码答案时按 [双击 Ctrl] 自动写入剪切板（Ctrl+V 即粘贴）。")
+    print(f"  鼠标移至屏幕右上角停留 0.3s 自动截题；")
+    print(f"  辅助电脑输出答案后，主电脑按 [双击 Ctrl] 即可直接粘贴！")
     print("#" * 65 + "\n")
 
     try:

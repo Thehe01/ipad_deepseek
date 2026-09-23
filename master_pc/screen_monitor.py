@@ -12,6 +12,7 @@ from ctypes import wintypes
 
 try:
     from master_config import (
+        ENABLE_SCREEN_DIFF_TRIGGER,
         DIFF_THRESHOLD,
         STABILIZE_DELAY,
         POLL_INTERVAL,
@@ -26,12 +27,13 @@ try:
         MOUSE_TRIGGER_CONFIG_FILE,
     )
 except ImportError:
+    ENABLE_SCREEN_DIFF_TRIGGER = False
     DIFF_THRESHOLD = 0.025
     STABILIZE_DELAY = 0.8
     POLL_INTERVAL = 0.25
     MAX_STABILIZE_TIMEOUT = 4.0
     AUTO_COOLDOWN = 2.0
-    UPLOAD_INITIAL_QUESTION = True
+    UPLOAD_INITIAL_QUESTION = False
     MOUSE_TRIGGER_ENABLED = True
     MOUSE_CORNER_WIDTH = 120
     MOUSE_CORNER_HEIGHT = 80
@@ -76,6 +78,7 @@ class ScreenMonitor:
         max_stabilize_timeout=None,
         cooldown=None,
         upload_initial=None,
+        enable_screen_diff_trigger=None,
         mouse_trigger_enabled=None,
         mouse_corner_w=None,
         mouse_corner_h=None,
@@ -103,6 +106,9 @@ class ScreenMonitor:
         self.cooldown = cooldown if cooldown is not None else AUTO_COOLDOWN
         self.upload_initial = (
             upload_initial if upload_initial is not None else UPLOAD_INITIAL_QUESTION
+        )
+        self.enable_screen_diff_trigger = (
+            enable_screen_diff_trigger if enable_screen_diff_trigger is not None else ENABLE_SCREEN_DIFF_TRIGGER
         )
 
         # 鼠标热区（屏幕右上角 / 自定义热区）触发配置
@@ -244,23 +250,29 @@ class ScreenMonitor:
         if self.is_running:
             return
         self.is_running = True
-        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self._thread.start()
+
+        if self.enable_screen_diff_trigger:
+            self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._thread.start()
+            self._log(
+                f"[全自动切题引擎] 画面像素帧差检测已开启。监控区域: {self.bbox}, "
+                f"变动阈值: {self.diff_threshold*100:.1f}%, 防抖稳定: {self.stabilize_delay}s, "
+                f"采样间隔: {self.poll_interval}s, 冷却时间: {self.cooldown}s"
+            )
+        else:
+            self._log(
+                f"[截题模式] 画面像素帧差检测已关闭（零误触），唯一截题触发通道："
+                f"鼠标在屏幕右上角停留 {self.mouse_hover_time:.1f}s 截题！"
+            )
 
         if self.mouse_trigger_enabled:
             self._mouse_thread = threading.Thread(target=self._mouse_trigger_loop, daemon=True)
             self._mouse_thread.start()
-
-        self._log(
-            f"[全自动切题引擎] 已启动！监控区域: {self.bbox}, "
-            f"变动阈值: {self.diff_threshold*100:.1f}%, 防抖稳定: {self.stabilize_delay}s, "
-            f"采样间隔: {self.poll_interval}s, 冷却时间: {self.cooldown}s"
-        )
-        if self.mouse_trigger_enabled:
-            self._log(
-                f"[鼠标触发就绪] 鼠标在屏幕右上角（宽度: {self.mouse_corner_w}px, 高度: {self.mouse_corner_h}px）"
-                f"停留达到 {self.mouse_hover_time:.1f}s 即可自动截屏！"
-            )
+            if self.enable_screen_diff_trigger:
+                self._log(
+                    f"[鼠标触发就绪] 鼠标在屏幕右上角（宽度: {self.mouse_corner_w}px, 高度: {self.mouse_corner_h}px）"
+                    f"停留达到 {self.mouse_hover_time:.1f}s 即可自动截屏！"
+                )
 
     def stop(self):
         self.is_running = False
@@ -309,7 +321,7 @@ class ScreenMonitor:
                     hover_dur = now - self._hover_start_time
 
                     if hover_dur >= self.mouse_hover_time and not self._corner_already_triggered:
-                        cooldown_ok = (now - self._last_mouse_trigger_time >= self.mouse_trigger_cooldown) and (now - self.last_snap_time >= 1.0)
+                        cooldown_ok = (now - self._last_mouse_trigger_time >= self.mouse_trigger_cooldown) and (now - self.last_snap_time >= min(self.mouse_trigger_cooldown, 1.0))
                         if cooldown_ok:
                             location_desc = "屏幕右上角" if in_top_right else "自定义触发区"
                             self._log(
@@ -338,6 +350,8 @@ class ScreenMonitor:
                 time.sleep(0.1)
 
     def _monitor_loop(self):
+        if not self.enable_screen_diff_trigger:
+            return
         last_fail_log = 0.0
 
         while self.is_running:
