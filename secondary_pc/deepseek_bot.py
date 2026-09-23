@@ -206,10 +206,22 @@ class DeepSeekBot:
             return
         leftovers = []
         try:
+            # 清理历史可能遗留的 .tmp 碎片
+            for fname in os.listdir(RECEIVED_DIR):
+                if fname.endswith(".tmp"):
+                    try:
+                        os.remove(os.path.join(RECEIVED_DIR, fname))
+                    except Exception:
+                        pass
+
             for fname in os.listdir(RECEIVED_DIR):
                 if fname.startswith("task_") and fname.endswith(".png"):
                     p = os.path.join(RECEIVED_DIR, fname)
-                    leftovers.append((os.path.getmtime(p), p))
+                    try:
+                        if os.path.getsize(p) > 0:
+                            leftovers.append((os.path.getmtime(p), p))
+                    except Exception:
+                        pass
             leftovers.sort(key=lambda x: x[0])
             for _, p in leftovers:
                 self.send_question(p)
@@ -531,20 +543,21 @@ class DeepSeekBot:
             time.sleep(0.8)
 
 
-        if last_answer:
-            print("\n" + "=" * 60)
-            print(f"[DeepSeek 答案已生成并同步] >>>\n{last_answer}")
-            print("=" * 60 + "\n")
-            if self.on_answer_callback:
-                self.on_answer_callback(last_answer)
-        else:
-            print("[提示] 本题超时或未获取到文本内容。")
-            if self.on_status_callback:
-                self.on_status_callback("🟢 监控中 (等待切题)")
-
         if ENABLE_R1:
             try:
                 time.sleep(0.5)
                 self._ensure_r1_enabled(page)
             except Exception:
                 pass
+
+        if not last_answer:
+            print(f"\n[错误] 本题等待 DeepSeek 生成答案超时 ({max_wait_time} 秒未获取到有效回答)！")
+            if self.on_status_callback:
+                self.on_status_callback(f"⚠️ 解题响应超时 ({max_wait_time}s)，保留题目并准备重试...")
+            raise TimeoutError(f"等待 DeepSeek 解题响应超时 ({max_wait_time} 秒未获取到有效回答)")
+
+        print("\n" + "=" * 60)
+        print(f"[DeepSeek 答案已生成并同步] >>>\n{last_answer}")
+        print("=" * 60 + "\n")
+        if self.on_answer_callback:
+            self.on_answer_callback(last_answer)

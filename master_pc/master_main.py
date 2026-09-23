@@ -272,6 +272,22 @@ def grab_roi(roi):
         raise RuntimeError(f"屏幕截图失败: {e}")
 
 
+def _atomic_write_bytes(filepath, data):
+    """原子写入二进制数据：先写同目录下临时文件，再原子替换，防止断电导致文件截断损坏"""
+    tmp_path = f"{filepath}.{uuid.uuid4().hex[:6]}.tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+    os.replace(tmp_path, filepath)
+
+
+def _atomic_write_json(filepath, data):
+    """原子写入 JSON 数据：先写同目录下临时文件，再原子替换，防止写入中断损坏 JSON"""
+    tmp_path = f"{filepath}.{uuid.uuid4().hex[:6]}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp_path, filepath)
+
+
 def _clean_persisted_file(file_path, meta_path):
     """当题目确认成功上传或被客户端错误明确拒绝后，安全清除本地持久化文件"""
     try:
@@ -289,51 +305,69 @@ def _clean_persisted_file(file_path, meta_path):
 def recover_pending_uploads():
     """
     启动时扫描 pending_uploads 目录，将上次进程退出或异常中断未送达的截图恢复至上传队列。
-    严格按时间戳先后顺序排队，杜绝进程退出或崩溃导致的题目丢失。
+    以 PNG 实体图片为第一准绳：
+    - 哪怕伴生 JSON 元数据被意外截断或损坏，只要 PNG 图片完整，依然 100% 恢复，并自动重建规范元数据；
+    - 自动清理上次中断遗留的 .tmp 临时碎片；
+    - 严格按时间戳先后顺序排队，杜绝进程退出或崩溃导致的题目丢失。
     """
     os.makedirs(PENDING_UPLOAD_DIR, exist_ok=True)
     recovered = []
     try:
+        # 1. 清理上次中断遗留的 .tmp 临时碎片
         for fname in os.listdir(PENDING_UPLOAD_DIR):
-            if fname.endswith(".json"):
-                meta_path = os.path.join(PENDING_UPLOAD_DIR, fname)
+            if fname.endswith(".tmp"):
                 try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    img_file = meta.get("image_file")
-                    file_path = os.path.join(PENDING_UPLOAD_DIR, img_file)
-                    if os.path.exists(file_path):
-                        with open(file_path, "rb") as f:
-                            img_bytes = f.read()
-                        recovered.append((
-                            meta.get("enqueue_time", os.path.getmtime(file_path)),
-                            img_bytes,
-                            meta.get("trigger_name", "历史待发截图"),
-                            file_path,
-                            meta_path,
-                        ))
+                    os.remove(os.path.join(PENDING_UPLOAD_DIR, fname))
                 except Exception:
                     pass
 
-        # 兜底：检查没有 json 的孤儿 png
+        # 2. 遍历所有实体 PNG 图片作为首要数据源（绝对不因 JSON 损坏而漏题）
         for fname in os.listdir(PENDING_UPLOAD_DIR):
             if fname.endswith(".png"):
                 file_path = os.path.join(PENDING_UPLOAD_DIR, fname)
+                try:
+                    size = os.path.getsize(file_path)
+                    if size == 0:
+                        continue  # 忽略 0 字节损坏文件
+                except Exception:
+                    continue
+
                 base_name = os.path.splitext(fname)[0]
                 meta_path = os.path.join(PENDING_UPLOAD_DIR, f"{base_name}.json")
-                if not os.path.exists(meta_path) and not any(r[3] == file_path for r in recovered):
+                trigger_name = "历史待发截图"
+                enqueue_time = os.path.getmtime(file_path)
+                meta_valid = False
+
+                # 尝试解析伴生元数据 JSON
+                if os.path.exists(meta_path):
                     try:
-                        with open(file_path, "rb") as f:
-                            img_bytes = f.read()
-                        recovered.append((
-                            os.path.getmtime(file_path),
-                            img_bytes,
-                            "历史待发截图",
-                            file_path,
-                            None,
-                        ))
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            meta = json.load(f)
+                        if isinstance(meta, dict):
+                            trigger_name = meta.get("trigger_name", trigger_name)
+                            enqueue_time = meta.get("enqueue_time", enqueue_time)
+                            meta_valid = True
+                    except Exception as e:
+                        _log(f"[启动恢复] 提示：元数据 {base_name}.json 损坏或被截断 ({e})，直接以对应完整图片恢复！")
+
+                # 如果 JSON 损坏或不存在，原子重建一份规范元数据
+                if not meta_valid:
+                    try:
+                        _atomic_write_json(meta_path, {
+                            "task_id": base_name,
+                            "trigger_name": trigger_name,
+                            "enqueue_time": enqueue_time,
+                            "image_file": fname,
+                        })
                     except Exception:
                         pass
+
+                try:
+                    with open(file_path, "rb") as f:
+                        img_bytes = f.read()
+                    recovered.append((enqueue_time, img_bytes, trigger_name, file_path, meta_path))
+                except Exception as e:
+                    _log(f"[启动恢复] 读取图片 {fname} 异常: {e}")
 
         # 按时间升序排序，严格保证题目先后顺序
         recovered.sort(key=lambda x: x[0])
@@ -348,10 +382,11 @@ def recover_pending_uploads():
 
 def enqueue_upload(img_or_path, trigger_name="快捷键"):
     """
-    将待上传图像打包为内存 PNG 字节流，并立即持久化落盘至 pending_uploads 目录。
+    将待上传图像打包为内存 PNG 字节流，并立即原子持久化落盘至 pending_uploads 目录。
     1. 逐任务保存独立持久化文件，彻底杜绝进程退出、崩溃或断电导致的未发送截图丢失；
-    2. 加入内存上传队列排队等待发送；
-    3. 仅在辅助电脑确认成功接收（HTTP 200）后才删除对应磁盘文件。
+    2. 采用临时文件+原子重命名写入，杜绝断电导致文件截断损坏；
+    3. 加入内存上传队列排队等待发送；
+    4. 仅在辅助电脑确认成功接收（HTTP 200）后才删除对应磁盘文件。
     """
     try:
         if isinstance(img_or_path, str):
@@ -371,22 +406,20 @@ def enqueue_upload(img_or_path, trigger_name="快捷键"):
             _log(f"[{trigger_name}] 错误：不支持的图像对象类型 {type(img_or_path)}")
             return
 
-        # 逐任务持久化落盘
+        # 逐任务原子持久化落盘
         os.makedirs(PENDING_UPLOAD_DIR, exist_ok=True)
         now_ts = time.time()
         task_id = f"pending_{int(now_ts * 1000)}_{uuid.uuid4().hex[:6]}"
         file_path = os.path.join(PENDING_UPLOAD_DIR, f"{task_id}.png")
         meta_path = os.path.join(PENDING_UPLOAD_DIR, f"{task_id}.json")
 
-        with open(file_path, "wb") as f:
-            f.write(img_bytes)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "task_id": task_id,
-                "trigger_name": trigger_name,
-                "enqueue_time": now_ts,
-                "image_file": f"{task_id}.png",
-            }, f, ensure_ascii=False)
+        _atomic_write_bytes(file_path, img_bytes)
+        _atomic_write_json(meta_path, {
+            "task_id": task_id,
+            "trigger_name": trigger_name,
+            "enqueue_time": now_ts,
+            "image_file": f"{task_id}.png",
+        })
 
         _upload_queue.put((img_bytes, trigger_name, now_ts, file_path, meta_path))
     except Exception as e:

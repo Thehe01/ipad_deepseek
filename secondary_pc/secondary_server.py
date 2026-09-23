@@ -656,8 +656,11 @@ class SecondaryServer:
                             os.makedirs(RECEIVED_DIR, exist_ok=True)
                             task_filename = f"task_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}.png"
                             task_image_path = os.path.join(RECEIVED_DIR, task_filename)
-                            with open(task_image_path, "wb") as f:
+                            # 采用临时文件+原子替换，防止上传中断产生破损截断文件
+                            tmp_task_path = f"{task_image_path}.{uuid.uuid4().hex[:6]}.tmp"
+                            with open(tmp_task_path, "wb") as f:
                                 f.write(file_data)
+                            os.replace(tmp_task_path, task_image_path)
 
                             # 记录主电脑 IP（用于后续把代码答案推回给主电脑剪切板）
                             master_ip = self.client_address[0]
