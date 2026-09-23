@@ -34,5 +34,8 @@ DEFAULT_PROMPT = (
     "3. 编程代码题：第一行输出题号，随后输出标准 Markdown 代码块（严禁在代码中写任何注释，严禁任何废话思路）。"
 )
 
-# 临时接收的题目图片存储路径
+# 临时接收的题目图片存储路径（用于单图快速预览排查）
 TEMP_RECEIVED_IMAGE = os.path.join(BASE_DIR, "temp_received_question.png")
+
+# 专属独立接收图片存储目录（每个排队任务独享独立文件，杜绝并发覆盖）
+RECEIVED_DIR = os.path.join(BASE_DIR, "received_questions")

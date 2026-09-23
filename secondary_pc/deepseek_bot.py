@@ -5,13 +5,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
 import queue
 import threading
+import uuid
 from playwright.sync_api import sync_playwright
 from secondary_config import (
     DEEPSEEK_URL,
     USER_DATA_DIR,
     ENABLE_R1,
     DEFAULT_PROMPT,
-    SYSTEM_PROMPT
+    SYSTEM_PROMPT,
+    TEMP_RECEIVED_IMAGE,
+    RECEIVED_DIR,
 )
 
 class DeepSeekBot:
@@ -49,16 +52,43 @@ class DeepSeekBot:
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=3.0)
 
-    def send_question(self, image_path, prompt=None):
-        """提交题目发送任务到工作队列"""
+    def send_question(self, image_input, prompt=None):
+        """
+        提交题目发送任务到工作队列。
+        支持独立文件路径（str/Path）或内存图像二进制（bytes）。
+        保证每个排队任务持有独立图片内容与专属独立文件，彻底杜绝排队多图并发覆盖。
+        """
         if not self.is_running:
             print("[警告] DeepSeekBot 尚未启动！")
             return
         if self.is_busy:
             print("[提示] 上一题仍在处理或 DeepSeek 正在生成中，将排队发送...")
-        
+
+        # 确保每个任务持有完全独立的专属图片文件
+        os.makedirs(RECEIVED_DIR, exist_ok=True)
+        task_id = f"task_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+        independent_file_path = os.path.join(RECEIVED_DIR, f"{task_id}.png")
+
+        if isinstance(image_input, bytes):
+            with open(independent_file_path, "wb") as f:
+                f.write(image_input)
+            image_bytes = image_input
+        elif isinstance(image_input, str):
+            src_path = os.path.abspath(image_input)
+            with open(src_path, "rb") as f:
+                image_bytes = f.read()
+            # 若传入的已是位于 RECEIVED_DIR 下的独立 task_xxx 文件，直接复用；否则（如传入公共临时文件）创建独立副本
+            if os.path.dirname(src_path) == os.path.abspath(RECEIVED_DIR) and os.path.basename(src_path).startswith("task_"):
+                independent_file_path = src_path
+            else:
+                with open(independent_file_path, "wb") as f:
+                    f.write(image_bytes)
+        else:
+            raise ValueError(f"不支持的图像输入类型: {type(image_input)}")
+
         self.task_queue.put(("SEND_QUESTION", {
-            "image_path": os.path.abspath(image_path),
+            "image_path": independent_file_path,
+            "image_bytes": image_bytes,
             "prompt": prompt if prompt is not None else DEFAULT_PROMPT
         }))
 
@@ -124,12 +154,19 @@ class DeepSeekBot:
                         break
                     elif task_type == "SEND_QUESTION":
                         self.is_busy = True
+                        task_img = payload.get("image_path")
                         try:
-                            self._do_send_question(page, payload["image_path"], payload["prompt"])
+                            self._do_send_question(page, task_img, payload["prompt"])
                         except Exception as e:
                             print(f"[错误] 发送题目失败: {e}")
                         finally:
                             self.is_busy = False
+                            # 清理任务专属独立临时文件（不影响公共预览文件），避免磁盘堆积
+                            try:
+                                if task_img and os.path.exists(task_img) and os.path.abspath(task_img) != os.path.abspath(TEMP_RECEIVED_IMAGE):
+                                    os.remove(task_img)
+                            except Exception:
+                                pass
                             self.task_queue.task_done()
 
                 try:

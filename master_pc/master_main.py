@@ -300,10 +300,10 @@ def enqueue_upload(img_or_path, trigger_name="快捷键"):
 def _upload_worker():
     """
     后台单线程排队上传工人：
-    1. 辅机尚未连通时在队列中持久等待，绝不因超时抛弃题目；
-    2. 严格按顺序串行上传，保证题目顺序与完整性；
-    3. 遇到网络波动、辅机未就绪或临时断开时持续重试，直到成功送达（或遇到不可恢复的 4xx 客户端错误）；
-    4. 只有在任务成功处理或明确不可恢复时才调用 task_done()，保证 join() 与计数一致。
+    1. 每次成功 get() 使用 try...finally 保证且仅保证调用一次 task_done()（杜绝退出时重复扣减未完成计数）；
+    2. 辅机尚未连通时在队列中持久等待，绝不因超时抛弃题目；
+    3. 严格按顺序串行上传，保证题目顺序与完整性；
+    4. 遇到网络波动、辅机未就绪或临时断开时持续重试，直到成功送达（或遇到不可恢复的 4xx 客户端错误、或系统退出）。
     """
     global _running, _secondary_url
     while _running:
@@ -312,67 +312,60 @@ def _upload_worker():
         except queue.Empty:
             continue
 
-        img_bytes, trigger_name, enqueue_time = item
+        try:
+            img_bytes, trigger_name, enqueue_time = item
 
-        # 1. 若辅助电脑尚未就绪，在队列中持续等待辅机上线，绝不抛弃当前题目
-        if not _secondary_url:
-            _log(f"[{trigger_name}] 辅助电脑连接尚未就绪，截图已在队列持续暂存，等待辅机上线...")
-            while _running and not _secondary_url:
-                _connection_ready.wait(timeout=1.0)
+            # 1. 若辅助电脑尚未就绪，在队列中持续等待辅机上线，绝不抛弃当前题目
+            if not _secondary_url:
+                _log(f"[{trigger_name}] 辅助电脑连接尚未就绪，截图已在队列持续暂存，等待辅机上线...")
+                while _running and not _secondary_url:
+                    _connection_ready.wait(timeout=1.0)
 
-        if not _running:
-            _upload_queue.task_done()
-            break
+            if not _running:
+                break
 
-        # 2. 持续上传重试循环，直到成功送达辅机
-        attempt = 0
-        while _running:
-            attempt += 1
-            start_t = time.time()
-            try:
-                files = {"image": ("question.png", img_bytes, "image/png")}
-                res = requests.post(
-                    f"{_secondary_url}/api/upload_question",
-                    files=files,
-                    proxies={"http": None, "https": None},
-                    timeout=7.0,
-                )
-                elapsed_ms = int((time.time() - start_t) * 1000)
-                if res.status_code == 200:
-                    _log(f"[{trigger_name}] ✅ 截图已送达辅助电脑！耗时 {elapsed_ms} 毫秒，DeepSeek R1 正在解题...")
-                    _upload_queue.task_done()
-                    break
-                elif 400 <= res.status_code < 500:
-                    _log(f"[{trigger_name}] ❌ 辅机返回客户端错误 {res.status_code}: {res.text}，跳过此题。")
-                    _upload_queue.task_done()
-                    break
-                else:
-                    _log(f"[{trigger_name}] ⚠️ 辅机返回服务状态码 {res.status_code}，将在 2 秒后持续重试 (第 {attempt} 次)...")
-            except Exception as e:
-                _log(f"[{trigger_name}] ⚠️ 上传异常: {e}，将在 2 秒后持续重试 (第 {attempt} 次)...")
-
-            # 若多次连接失败，辅机可能重新开机或更换了 IP，尝试广播重探一次
-            if attempt % 5 == 0:
+            # 2. 持续上传重试循环，直到成功送达辅机或系统退出
+            attempt = 0
+            while _running:
+                attempt += 1
+                start_t = time.time()
                 try:
-                    new_url = discover_secondary_pc(timeout=1.5)
-                    if new_url and new_url != _secondary_url:
-                        _secondary_url = new_url
-                        _log(f"[{trigger_name}] 辅机网络地址已重新对齐: {_secondary_url}")
-                except Exception:
-                    pass
+                    files = {"image": ("question.png", img_bytes, "image/png")}
+                    res = requests.post(
+                        f"{_secondary_url}/api/upload_question",
+                        files=files,
+                        proxies={"http": None, "https": None},
+                        timeout=7.0,
+                    )
+                    elapsed_ms = int((time.time() - start_t) * 1000)
+                    if res.status_code == 200:
+                        _log(f"[{trigger_name}] ✅ 截图已送达辅助电脑！耗时 {elapsed_ms} 毫秒，DeepSeek R1 正在解题...")
+                        break
+                    elif 400 <= res.status_code < 500:
+                        _log(f"[{trigger_name}] ❌ 辅机返回客户端错误 {res.status_code}: {res.text}，跳过此题。")
+                        break
+                    else:
+                        _log(f"[{trigger_name}] ⚠️ 辅机返回服务状态码 {res.status_code}，将在 2 秒后持续重试 (第 {attempt} 次)...")
+                except Exception as e:
+                    _log(f"[{trigger_name}] ⚠️ 上传异常: {e}，将在 2 秒后持续重试 (第 {attempt} 次)...")
 
-            # 等待 2 秒后重试，每 0.1 秒检查一次 _running 状态以支持快速退出
-            for _ in range(20):
-                if not _running:
-                    break
-                time.sleep(0.1)
+                # 若多次连接失败，辅机可能重新开机或更换了 IP，尝试广播重探一次
+                if attempt % 5 == 0:
+                    try:
+                        new_url = discover_secondary_pc(timeout=1.5)
+                        if new_url and new_url != _secondary_url:
+                            _secondary_url = new_url
+                            _log(f"[{trigger_name}] 辅机网络地址已重新对齐: {_secondary_url}")
+                    except Exception:
+                        pass
 
-        if not _running:
-            try:
-                _upload_queue.task_done()
-            except ValueError:
-                pass
-            break
+                # 等待 2 秒后重试，每 0.1 秒检查一次 _running 状态以支持快速退出
+                for _ in range(20):
+                    if not _running:
+                        break
+                    time.sleep(0.1)
+        finally:
+            _upload_queue.task_done()
 
 
 def on_hotkey_trigger(trigger_name="快捷键"):

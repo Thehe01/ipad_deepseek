@@ -7,7 +7,8 @@ import time
 import socket
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from secondary_config import HTTP_PORT, DISCOVERY_PORT, TEMP_RECEIVED_IMAGE
+import uuid
+from secondary_config import HTTP_PORT, DISCOVERY_PORT, TEMP_RECEIVED_IMAGE, RECEIVED_DIR
 
 import ctypes
 from ctypes import wintypes
@@ -644,7 +645,18 @@ class SecondaryServer:
                             file_data = body
 
                         if file_data:
-                            with open(TEMP_RECEIVED_IMAGE, "wb") as f:
+                            # 1. 顺便更新公共预览图（供排查与向后兼容）
+                            try:
+                                with open(TEMP_RECEIVED_IMAGE, "wb") as f:
+                                    f.write(file_data)
+                            except Exception:
+                                pass
+
+                            # 2. 为本次上传任务创建专属独立文件，每个任务持有独立图片，杜绝排队并发覆盖
+                            os.makedirs(RECEIVED_DIR, exist_ok=True)
+                            task_filename = f"task_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}.png"
+                            task_image_path = os.path.join(RECEIVED_DIR, task_filename)
+                            with open(task_image_path, "wb") as f:
                                 f.write(file_data)
 
                             # 记录主电脑 IP（用于后续把代码答案推回给主电脑剪切板）
@@ -653,10 +665,10 @@ class SecondaryServer:
                                 parent._master_ip = master_ip
 
                             parent.set_status("🟡 收到主电脑新题，正在调用 DeepSeek R1 解题...")
-                            print(f"\n[主电脑联动] 成功收到主电脑上传的题目截图 ({len(file_data)} 字节)！来自 {master_ip}")
+                            print(f"\n[主电脑联动] 成功收到主电脑上传的题目截图 ({len(file_data)} 字节)！已创建专属独立任务文件: {task_filename}，来自 {master_ip}")
 
                             if parent.on_question_received:
-                                parent.on_question_received(TEMP_RECEIVED_IMAGE)
+                                parent.on_question_received(task_image_path)
 
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
